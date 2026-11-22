@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { GeneralSettingsTab } from "./GeneralSettingsTab";
 
 type SettingsTab = "onboarding" | "general" | "vocabulary" | "history";
 
@@ -51,17 +52,7 @@ export function SettingsWindow() {
             </p>
           </section>
         )}
-        {activeTab === "general" && (
-          <section>
-            <h2 className="mb-2 text-base font-medium text-white">
-              Push-to-Talk Hotkey & Clipboard Preservation
-            </h2>
-            <p className="text-slate-400">
-              Customize your Push-to-Talk Hotkey, microphone device, and
-              Clipboard Preservation settings.
-            </p>
-          </section>
-        )}
+        {activeTab === "general" && <GeneralSettingsTab />}
         {activeTab === "vocabulary" && (
           <section>
             <h2 className="mb-2 text-base font-medium text-white">

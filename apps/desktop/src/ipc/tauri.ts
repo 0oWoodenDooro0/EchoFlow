@@ -7,6 +7,37 @@ export type DeliveryMode = "text_insertion" | "fallback_delivery" | "aborted";
 
 export type TrayStatus = "idle" | "listening" | "missing_credential" | "error";
 
+export type DisplayServer =
+  | "mac_os"
+  | "windows"
+  | "linux_x11"
+  | "linux_wayland"
+  | "unknown";
+
+export type PermissionStatus =
+  | "granted"
+  | "denied"
+  | "not_determined"
+  | "not_applicable";
+
+export interface PlatformCapabilities {
+  display_server: DisplayServer;
+  microphone_permission: PermissionStatus;
+  accessibility_permission: PermissionStatus;
+  supports_global_hotkey: boolean;
+  supports_text_insertion: boolean;
+  wayland_helpers: string[];
+  secret_service_available: boolean;
+}
+
+export interface AppPreferences {
+  push_to_talk_hotkey: string;
+  microphone_id: string | null;
+  restore_clipboard: boolean;
+  clipboard_restore_delay_ms: number;
+  history_retention_days: number;
+}
+
 export type SessionState =
   | { kind: "idle" }
   | { kind: "connecting" }
@@ -48,6 +79,22 @@ export async function simulateHotkeyRelease(): Promise<string | null> {
 
 export async function cancelDictationSession(): Promise<void> {
   return invoke<void>("cancel_dictation_session");
+}
+
+export async function getPreferences(): Promise<AppPreferences> {
+  return invoke<AppPreferences>("get_preferences");
+}
+
+export async function saveGeneralSettings(params: {
+  push_to_talk_hotkey: string;
+  restore_clipboard: boolean;
+  clipboard_restore_delay_ms: number;
+}): Promise<AppPreferences> {
+  return invoke<AppPreferences>("save_general_settings", params);
+}
+
+export async function getPlatformCapabilities(): Promise<PlatformCapabilities> {
+  return invoke<PlatformCapabilities>("get_platform_capabilities");
 }
 
 export async function subscribeControllerEvents(
