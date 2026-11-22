@@ -89,11 +89,11 @@ export function OverlayPill() {
     return null;
   }
 
-  const waveformBars = [0.4, 0.75, 1.0, 0.7, 0.45].map((scale, idx) => {
+  const waveformBars = [0.4, 0.75, 1.0, 0.7, 0.45].map((scale) => {
     const heightPct = Math.max(20, Math.round(audioLevel * 100 * scale));
     return (
       <span
-        key={idx}
+        key={`bar-${scale}`}
         className="w-1 rounded-full bg-emerald-400 transition-all duration-75"
         style={{ height: `${heightPct}%` }}
       />
@@ -117,6 +117,7 @@ export function OverlayPill() {
         {sessionState.kind === "listening" && (
           <>
             <div
+              role="img"
               className="flex h-5 items-center gap-0.5"
               aria-label="Audio waveform"
               data-rms={audioLevel.toFixed(2)}
