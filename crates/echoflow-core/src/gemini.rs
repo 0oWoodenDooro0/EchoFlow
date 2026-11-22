@@ -396,6 +396,27 @@ impl GeminiLiveClient {
                             )));
                         }
                     },
+                    Ok(Message::Binary(bytes)) => {
+                        let text = std::str::from_utf8(&bytes).map_err(|err| {
+                            DictationError::TranscriptionTransportFailed(format!(
+                                "non-UTF8 binary server handshake response: {err}"
+                            ))
+                        })?;
+                        match parse_server_event(text) {
+                            Ok(Some(GeminiServerEvent::SetupComplete))
+                            | Ok(Some(GeminiServerEvent::DraftTranscript { .. }))
+                            | Ok(Some(GeminiServerEvent::FinalTranscript { .. })) => return Ok(()),
+                            Ok(Some(GeminiServerEvent::Error { message })) => {
+                                return Err(classify_server_error(message));
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                return Err(DictationError::TranscriptionTransportFailed(format!(
+                                    "malformed server handshake response: {err}"
+                                )));
+                            }
+                        }
+                    }
                     Ok(Message::Close(Some(frame))) => {
                         if frame.code == CloseCode::Normal {
                             return Ok(());
@@ -510,6 +531,32 @@ impl GeminiLiveClient {
                                 component = "gemini",
                                 cause = %err,
                                 "ignoring unrecognized Gemini server message"
+                            );
+                        }
+                    },
+                    Ok(Message::Binary(bytes)) => match std::str::from_utf8(&bytes) {
+                        Ok(text) => match parse_server_event(text) {
+                            Ok(Some(event)) => {
+                                if inbound_tx.send(Ok(event)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                tracing::warn!(
+                                    status = "DEGRADED",
+                                    component = "gemini",
+                                    cause = %err,
+                                    "ignoring unrecognized Gemini binary server message"
+                                );
+                            }
+                        },
+                        Err(err) => {
+                            tracing::warn!(
+                                status = "DEGRADED",
+                                component = "gemini",
+                                cause = %err,
+                                "ignoring non-UTF8 Gemini binary server message"
                             );
                         }
                     },
