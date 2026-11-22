@@ -149,16 +149,18 @@ async fn start_handshake_server(accept_key: bool, echo_key_on_error: bool) -> St
                 let (mut write, mut read) = ws_stream.split();
                 let _ = read.next().await;
                 let payload = if accept_key {
-                    json!({ "type": "setup_complete" })
+                    json!({ "setupComplete": {} })
                 } else if echo_key_on_error {
                     json!({
-                        "type": "error",
-                        "message": "401 Unauthorized: invalid API key AIzaSySuperSecretSentinelKey987654321"
+                        "error": {
+                            "message": "401 Unauthorized: invalid API key AIzaSySuperSecretSentinelKey987654321"
+                        }
                     })
                 } else {
                     json!({
-                        "type": "error",
-                        "message": "401 Unauthorized: invalid API key"
+                        "error": {
+                            "message": "401 Unauthorized: invalid API key"
+                        }
                     })
                 };
                 let _ = write.send(Message::Text(payload.to_string().into())).await;

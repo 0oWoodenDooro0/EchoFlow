@@ -98,6 +98,7 @@ fn rms_is_strictly_clamped_between_zero_and_one() {
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use echoflow_core::controller::{DictationController, SessionTimersConfig};
 use echoflow_core::domain::{
     AudioDeviceInfo, ControllerEvent, DictationError, SessionState, TrayStatus,
@@ -124,20 +125,36 @@ async fn start_ws_sink(final_text: &str) -> (String, Arc<Mutex<usize>>) {
         let (mut write, mut read) = ws.split();
         while let Some(Ok(msg)) = read.next().await {
             match msg {
-                Message::Binary(bytes) => {
-                    *pcm_clone.lock().await += bytes.len();
-                }
                 Message::Text(text) => {
                     let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-                    if parsed.get("type").and_then(|v| v.as_str()) == Some("end_of_audio") {
-                        let _ = write
-                            .send(Message::Text(
-                                json!({ "type": "final_transcript", "text": final_text })
+                    if let Some(realtime) = parsed.get("realtimeInput") {
+                        if let Some(chunks) = realtime.get("mediaChunks").and_then(|v| v.as_array())
+                        {
+                            for chunk in chunks {
+                                assert_eq!(chunk["mimeType"], "audio/pcm;rate=16000");
+                                let encoded = chunk["data"].as_str().unwrap();
+                                let decoded = base64::engine::general_purpose::STANDARD
+                                    .decode(encoded)
+                                    .unwrap();
+                                *pcm_clone.lock().await += decoded.len();
+                            }
+                        } else if realtime.get("audioStreamEnd").and_then(|v| v.as_bool())
+                            == Some(true)
+                        {
+                            let _ = write
+                                .send(Message::Text(
+                                    json!({
+                                        "serverContent": {
+                                            "inputTranscription": { "text": final_text },
+                                            "turnComplete": true,
+                                        }
+                                    })
                                     .to_string()
                                     .into(),
-                            ))
-                            .await;
-                        break;
+                                ))
+                                .await;
+                            break;
+                        }
                     }
                 }
                 Message::Close(_) => break,

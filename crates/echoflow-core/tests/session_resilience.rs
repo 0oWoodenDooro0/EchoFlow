@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use echoflow_core::controller::{DictationController, SessionTimersConfig};
 use echoflow_core::domain::{
     AudioDeviceInfo, ControllerEvent, DeliveryMode, DictationError, PlatformCapabilities,
@@ -192,60 +193,72 @@ async fn start_resilience_ws_server(
             match msg {
                 Message::Text(text) => {
                     let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-                    match parsed.get("type").and_then(|v| v.as_str()) {
-                        Some("setup") => {
-                            let _ = write
-                                .send(Message::Text(
-                                    json!({ "type": "setup_complete" }).to_string().into(),
-                                ))
-                                .await;
-                        }
-                        Some("end_of_audio") => {
+                    if parsed.get("setup").is_some() {
+                        let _ = write
+                            .send(Message::Text(
+                                json!({ "setupComplete": {} }).to_string().into(),
+                            ))
+                            .await;
+                    } else if let Some(realtime) = parsed.get("realtimeInput") {
+                        if realtime.get("audioStreamEnd").and_then(|v| v.as_bool()) == Some(true) {
                             record_clone.lock().await.received_end_of_audio = true;
                             let _ = write
                                 .send(Message::Text(
                                     json!({
-                                        "type": "final_transcript",
-                                        "text": final_transcript,
+                                        "serverContent": {
+                                            "inputTranscription": { "text": final_transcript },
+                                            "turnComplete": true,
+                                        }
                                     })
                                     .to_string()
                                     .into(),
                                 ))
                                 .await;
                             break;
+                        } else if let Some(chunks) =
+                            realtime.get("mediaChunks").and_then(|v| v.as_array())
+                        {
+                            for chunk in chunks {
+                                assert_eq!(chunk["mimeType"], "audio/pcm;rate=16000");
+                                let encoded = chunk["data"].as_str().unwrap();
+                                let decoded = base64::engine::general_purpose::STANDARD
+                                    .decode(encoded)
+                                    .unwrap();
+                                let chunk_num = {
+                                    let mut guard = record_clone.lock().await;
+                                    guard.pcm_chunks_received += 1;
+                                    guard.pcm_bytes_received += decoded.len();
+                                    guard.pcm_chunks_received
+                                };
+                                if chunk_num == 1 {
+                                    let _ = write
+                                        .send(Message::Text(
+                                            json!({
+                                                "serverContent": {
+                                                    "inputTranscription": { "text": draft_on_first_chunk },
+                                                    "turnComplete": false,
+                                                }
+                                            })
+                                            .to_string()
+                                            .into(),
+                                        ))
+                                        .await;
+                                } else if chunk_num == 2 {
+                                    let _ = write
+                                        .send(Message::Text(
+                                            json!({
+                                                "serverContent": {
+                                                    "inputTranscription": { "text": draft_on_second_chunk },
+                                                    "turnComplete": false,
+                                                }
+                                            })
+                                            .to_string()
+                                            .into(),
+                                        ))
+                                        .await;
+                                }
+                            }
                         }
-                        _ => {}
-                    }
-                }
-                Message::Binary(bytes) => {
-                    let chunk_num = {
-                        let mut guard = record_clone.lock().await;
-                        guard.pcm_chunks_received += 1;
-                        guard.pcm_bytes_received += bytes.len();
-                        guard.pcm_chunks_received
-                    };
-                    if chunk_num == 1 {
-                        let _ = write
-                            .send(Message::Text(
-                                json!({
-                                    "type": "draft_transcript",
-                                    "text": draft_on_first_chunk,
-                                })
-                                .to_string()
-                                .into(),
-                            ))
-                            .await;
-                    } else if chunk_num == 2 {
-                        let _ = write
-                            .send(Message::Text(
-                                json!({
-                                    "type": "draft_transcript",
-                                    "text": draft_on_second_chunk,
-                                })
-                                .to_string()
-                                .into(),
-                            ))
-                            .await;
                     }
                 }
                 Message::Close(_) => break,
@@ -436,46 +449,52 @@ async fn start_disconnect_ws_server(
             match msg {
                 Message::Text(text) => {
                     let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-                    if parsed.get("type").and_then(|v| v.as_str()) == Some("setup") {
+                    if parsed.get("setup").is_some() {
                         let _ = write
                             .send(Message::Text(
-                                json!({ "type": "setup_complete" }).to_string().into(),
+                                json!({ "setupComplete": {} }).to_string().into(),
                             ))
                             .await;
-                    }
-                }
-                Message::Binary(_) => {
-                    if let Some(ref draft) = draft_before_failure {
-                        let _ = write
-                            .send(Message::Text(
-                                json!({
-                                    "type": "draft_transcript",
-                                    "text": draft,
-                                })
-                                .to_string()
-                                .into(),
-                            ))
-                            .await;
-                    }
-                    match &failure {
-                        MidStreamFailure::AbruptSocketDrop => {
-                            // Drop socket abruptly without sending a WebSocket close frame.
-                            drop(write);
-                            drop(read);
-                            break;
-                        }
-                        MidStreamFailure::ServerError(err_msg) => {
+                    } else if parsed
+                        .get("realtimeInput")
+                        .and_then(|r| r.get("mediaChunks"))
+                        .is_some()
+                    {
+                        if let Some(ref draft) = draft_before_failure {
                             let _ = write
                                 .send(Message::Text(
                                     json!({
-                                        "type": "error",
-                                        "message": err_msg,
+                                        "serverContent": {
+                                            "inputTranscription": { "text": draft },
+                                            "turnComplete": false,
+                                        }
                                     })
                                     .to_string()
                                     .into(),
                                 ))
                                 .await;
-                            break;
+                        }
+                        match &failure {
+                            MidStreamFailure::AbruptSocketDrop => {
+                                // Drop socket abruptly without sending a WebSocket close frame.
+                                drop(write);
+                                drop(read);
+                                break;
+                            }
+                            MidStreamFailure::ServerError(err_msg) => {
+                                let _ = write
+                                    .send(Message::Text(
+                                        json!({
+                                            "error": {
+                                                "message": err_msg,
+                                            }
+                                        })
+                                        .to_string()
+                                        .into(),
+                                    ))
+                                    .await;
+                                break;
+                            }
                         }
                     }
                 }

@@ -1,11 +1,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use echoflow_core::controller::{DictationController, SessionTimersConfig};
 use echoflow_core::domain::{
     AppPreferences, ControllerEvent, DictationError, HistoryEntry, SessionState, VocabularyEntry,
 };
-use echoflow_core::gemini::{GeminiClientConfig, GeminiLiveClient};
+use echoflow_core::gemini::{
+    parse_server_event, GeminiClientConfig, GeminiLiveClient, GeminiServerEvent,
+};
 use echoflow_core::platform::PcmFrame;
 use echoflow_core::store::{LocalStore, SqliteLocalStore};
 use echoflow_core::testing::FakePlatformAdapter;
@@ -40,9 +43,16 @@ async fn start_handshake_ws_server(response_event: serde_json::Value) -> String 
         let (mut write, mut read) = ws_stream.split();
         if let Some(Ok(Message::Text(text))) = read.next().await {
             let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-            assert_eq!(parsed["type"], "setup");
-            assert_eq!(parsed["model"], "gemini-3.5-transcribe-live");
-            assert_eq!(parsed["mode"], "SMART");
+            assert_eq!(
+                parsed["setup"]["model"],
+                "models/gemini-3.5-transcribe-live"
+            );
+            assert_eq!(
+                parsed["setup"]["generationConfig"]["responseModalities"],
+                json!(["TEXT"])
+            );
+            assert_eq!(parsed["setup"]["inputAudioTranscription"]["mode"], "SMART");
+            assert!(parsed["setup"].get("systemInstruction").is_none());
             let _ = write
                 .send(Message::Text(response_event.to_string().into()))
                 .await;
@@ -93,8 +103,9 @@ async fn verify_credential_rejects_missing_malformed_and_unauthorized_responses(
 
     // Server-level error after setup
     let err_ws_url = start_handshake_ws_server(json!({
-        "type": "error",
-        "message": "API key not valid (403)"
+        "error": {
+            "message": "API key not valid (403)"
+        }
     }))
     .await;
     let err_client = GeminiLiveClient::new(GeminiClientConfig {
@@ -107,9 +118,9 @@ async fn verify_credential_rejects_missing_malformed_and_unauthorized_responses(
         Err(DictationError::UnauthorizedProviderCredential(_))
     ));
 
-    // Valid setup_complete handshake
+    // Valid setupComplete handshake
     let ok_ws_url = start_handshake_ws_server(json!({
-        "type": "setup_complete"
+        "setupComplete": {}
     }))
     .await;
     let ok_client = GeminiLiveClient::new(GeminiClientConfig {
@@ -162,38 +173,53 @@ async fn start_recording_ws_server(
             match msg {
                 Message::Text(text) => {
                     let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-                    match parsed.get("type").and_then(|v| v.as_str()) {
-                        Some("setup") => {
-                            captured_clone.lock().await.setup_messages.push(parsed);
-                        }
-                        Some("end_of_audio") => {
+                    if parsed.get("setup").is_some() {
+                        captured_clone.lock().await.setup_messages.push(parsed);
+                        let _ = write
+                            .send(Message::Text(
+                                json!({ "setupComplete": {} }).to_string().into(),
+                            ))
+                            .await;
+                    } else if let Some(realtime) = parsed.get("realtimeInput") {
+                        if realtime.get("audioStreamEnd").and_then(|v| v.as_bool()) == Some(true) {
                             captured_clone.lock().await.received_end_of_audio = true;
                             if let Some(ref final_text) = final_transcript {
                                 let final_msg = json!({
-                                    "type": "final_transcript",
-                                    "text": final_text,
+                                    "serverContent": {
+                                        "inputTranscription": { "text": final_text },
+                                        "turnComplete": true,
+                                    }
                                 });
                                 let _ = write
                                     .send(Message::Text(final_msg.to_string().into()))
                                     .await;
                                 break;
                             }
-                        }
-                        _ => {}
-                    }
-                }
-                Message::Binary(bytes) => {
-                    captured_clone.lock().await.pcm_chunks.push(bytes.to_vec());
-                    if !drafts_sent {
-                        drafts_sent = true;
-                        for draft in &draft_updates {
-                            let draft_msg = json!({
-                                "type": "draft_transcript",
-                                "text": draft,
-                            });
-                            let _ = write
-                                .send(Message::Text(draft_msg.to_string().into()))
-                                .await;
+                        } else if let Some(chunks) =
+                            realtime.get("mediaChunks").and_then(|v| v.as_array())
+                        {
+                            for chunk in chunks {
+                                assert_eq!(chunk["mimeType"], "audio/pcm;rate=16000");
+                                let encoded = chunk["data"].as_str().unwrap();
+                                let decoded = base64::engine::general_purpose::STANDARD
+                                    .decode(encoded)
+                                    .unwrap();
+                                captured_clone.lock().await.pcm_chunks.push(decoded);
+                            }
+                            if !drafts_sent {
+                                drafts_sent = true;
+                                for draft in &draft_updates {
+                                    let draft_msg = json!({
+                                        "serverContent": {
+                                            "inputTranscription": { "text": draft },
+                                            "turnComplete": false,
+                                        }
+                                    });
+                                    let _ = write
+                                        .send(Message::Text(draft_msg.to_string().into()))
+                                        .await;
+                                }
+                            }
                         }
                     }
                 }
@@ -325,12 +351,21 @@ async fn setup_configures_smart_mode_and_forwards_custom_vocabulary_with_1000_ca
     let rec = captured.lock().await;
     assert_eq!(rec.api_key_header.as_deref(), Some("vocab-test-key"));
     assert_eq!(rec.setup_messages.len(), 1);
-    assert_eq!(rec.setup_messages[0]["type"], "setup");
-    assert_eq!(rec.setup_messages[0]["model"], "gemini-3.5-transcribe-live");
-    assert_eq!(rec.setup_messages[0]["mode"], "SMART");
     assert_eq!(
-        rec.setup_messages[0]["vocabulary"],
-        json!(["EchoFlow", "UniFFI", "kubectl"])
+        rec.setup_messages[0]["setup"]["model"],
+        "models/gemini-3.5-transcribe-live"
+    );
+    assert_eq!(
+        rec.setup_messages[0]["setup"]["generationConfig"]["responseModalities"],
+        json!(["TEXT"])
+    );
+    assert_eq!(
+        rec.setup_messages[0]["setup"]["inputAudioTranscription"]["mode"],
+        "SMART"
+    );
+    assert_eq!(
+        rec.setup_messages[0]["setup"]["systemInstruction"]["parts"][0]["text"],
+        "Preferred vocabulary terms: EchoFlow, UniFFI, kubectl"
     );
 
     // Direct client call with > 1,000 terms + blank entries caps at 1,000 non-empty terms.
@@ -350,7 +385,13 @@ async fn setup_configures_smart_mode_and_forwards_custom_vocabulary_with_1000_ca
     tx.close().await;
 
     let cap_rec = cap_captured.lock().await;
-    let sent_vocab = cap_rec.setup_messages[0]["vocabulary"].as_array().unwrap();
+    let sys_text = cap_rec.setup_messages[0]["setup"]["systemInstruction"]["parts"][0]["text"]
+        .as_str()
+        .unwrap();
+    let terms_csv = sys_text
+        .strip_prefix("Preferred vocabulary terms: ")
+        .unwrap();
+    let sent_vocab: Vec<&str> = terms_csv.split(", ").collect();
     assert_eq!(sent_vocab.len(), 1000);
     assert_eq!(sent_vocab[0], "term-0");
     assert_eq!(sent_vocab[999], "term-999");
@@ -577,4 +618,40 @@ async fn empty_or_whitespace_final_transcript_completes_without_insertion_or_his
         );
         assert!(store.list_history_entries().await.unwrap().is_empty());
     }
+}
+
+#[test]
+fn parse_server_event_handles_bidi_generate_content_variants() {
+    assert_eq!(
+        parse_server_event(r#"{"setupComplete":{}}"#).unwrap(),
+        Some(GeminiServerEvent::SetupComplete)
+    );
+    assert_eq!(
+        parse_server_event(
+            r#"{"serverContent":{"inputTranscription":{"text":"hello"},"turnComplete":false}}"#
+        )
+        .unwrap(),
+        Some(GeminiServerEvent::DraftTranscript {
+            text: "hello".to_string()
+        })
+    );
+    assert_eq!(
+        parse_server_event(
+            r#"{"serverContent":{"modelTurn":{"parts":[{"text":"hello "},{"text":"world"}]},"turnComplete":true}}"#
+        )
+        .unwrap(),
+        Some(GeminiServerEvent::FinalTranscript {
+            text: "hello world".to_string()
+        })
+    );
+    assert_eq!(
+        parse_server_event(r#"{"serverContent":{"turnComplete":true}}"#).unwrap(),
+        None
+    );
+    assert_eq!(
+        parse_server_event(r#"{"error":{"message":"quota exceeded"}}"#).unwrap(),
+        Some(GeminiServerEvent::Error {
+            message: "quota exceeded".to_string()
+        })
+    );
 }

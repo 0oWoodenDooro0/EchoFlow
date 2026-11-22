@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -39,34 +40,164 @@ impl Default for GeminiClientConfig {
     }
 }
 
-/// Outbound setup payload sent immediately after WebSocket connect.
+/// Outbound setup envelope sent immediately after WebSocket connect (`BidiGenerateContent`).
 ///
-/// Protocol shape (Issue #3 AC #2): sends a JSON `setup` frame followed by raw 16-bit 16kHz mono
-/// little-endian PCM binary WebSocket frames and a JSON `end_of_audio` flush frame on release.
+/// Sends a JSON `setup` frame followed by `realtimeInput.mediaChunks` JSON text frames
+/// containing base64-encoded 16-bit 16kHz mono little-endian PCM audio, and a
+/// `realtimeInput.audioStreamEnd` JSON text frame on release.
 #[derive(Debug, Clone, Serialize)]
-struct SetupMessage<'a> {
-    #[serde(rename = "type")]
-    msg_type: &'a str,
-    model: &'a str,
-    mode: &'a str,
-    vocabulary: &'a [String],
+struct SetupEnvelope {
+    setup: SetupPayload,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetupPayload {
+    model: String,
+    generation_config: GenerationConfig,
+    input_audio_transcription: InputAudioTranscriptionConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_instruction: Option<SystemInstruction>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerationConfig {
+    response_modalities: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InputAudioTranscriptionConfig {
+    mode: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SystemInstruction {
+    parts: Vec<TextPart>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TextPart {
+    text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RealtimeInputEnvelope<T> {
+    realtime_input: T,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaChunksPayload {
+    media_chunks: [MediaChunk; 1],
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaChunk {
+    mime_type: &'static str,
+    data: String,
 }
 
 /// Outbound end-of-audio signal sent when Push-to-Talk Hotkey is released.
 #[derive(Debug, Clone, Serialize)]
-struct EndOfAudioMessage<'a> {
-    #[serde(rename = "type")]
-    msg_type: &'a str,
+#[serde(rename_all = "camelCase")]
+struct AudioStreamEndPayload {
+    audio_stream_end: bool,
 }
 
-/// Inbound server messages parsed from the WebSocket transport.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+/// Inbound server messages parsed from the Gemini Live `BidiGenerateContent` WebSocket transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GeminiServerEvent {
     SetupComplete,
     DraftTranscript { text: String },
     FinalTranscript { text: String },
     Error { message: String },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawServerMessage {
+    setup_complete: Option<serde_json::Value>,
+    server_content: Option<RawServerContent>,
+    error: Option<RawServerError>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawServerContent {
+    input_transcription: Option<RawTranscription>,
+    model_turn: Option<RawModelTurn>,
+    turn_complete: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTranscription {
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawModelTurn {
+    parts: Option<Vec<RawPart>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPart {
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawServerError {
+    message: Option<String>,
+}
+
+/// Parse an inbound Gemini Live `BidiGenerateContent` JSON text frame.
+pub fn parse_server_event(raw: &str) -> Result<Option<GeminiServerEvent>, serde_json::Error> {
+    let msg: RawServerMessage = serde_json::from_str(raw)?;
+
+    if msg.setup_complete.is_some() {
+        return Ok(Some(GeminiServerEvent::SetupComplete));
+    }
+
+    if let Some(err) = msg.error {
+        return Ok(Some(GeminiServerEvent::Error {
+            message: err
+                .message
+                .unwrap_or_else(|| "unknown Gemini server error".to_string()),
+        }));
+    }
+
+    if let Some(content) = msg.server_content {
+        let extracted_text = content
+            .input_transcription
+            .and_then(|t| t.text)
+            .or_else(|| {
+                let parts = content.model_turn?.parts?;
+                let mut combined = String::new();
+                let mut saw_text = false;
+                for part in parts {
+                    if let Some(text) = part.text {
+                        saw_text = true;
+                        combined.push_str(&text);
+                    }
+                }
+                saw_text.then_some(combined)
+            });
+
+        return Ok(extracted_text.map(|text| {
+            if content.turn_complete == Some(true) {
+                GeminiServerEvent::FinalTranscript { text }
+            } else {
+                GeminiServerEvent::DraftTranscript { text }
+            }
+        }));
+    }
+
+    Err(serde::de::Error::custom(
+        "missing setupComplete, serverContent, or error field",
+    ))
 }
 
 enum OutboundCommand {
@@ -191,11 +322,33 @@ impl GeminiLiveClient {
             filtered
         };
 
-        let setup = SetupMessage {
-            msg_type: "setup",
-            model: &self.config.model,
-            mode: &self.config.mode,
-            vocabulary: &normalized,
+        let model = if self.config.model.starts_with("models/") {
+            self.config.model.clone()
+        } else {
+            format!("models/{}", self.config.model)
+        };
+
+        let system_instruction = if normalized.is_empty() {
+            None
+        } else {
+            Some(SystemInstruction {
+                parts: vec![TextPart {
+                    text: format!("Preferred vocabulary terms: {}", normalized.join(", ")),
+                }],
+            })
+        };
+
+        let setup = SetupEnvelope {
+            setup: SetupPayload {
+                model,
+                generation_config: GenerationConfig {
+                    response_modalities: vec!["TEXT"],
+                },
+                input_audio_transcription: InputAudioTranscriptionConfig {
+                    mode: self.config.mode.clone(),
+                },
+                system_instruction,
+            },
         };
         serde_json::to_string(&setup)
             .map_err(|e| DictationError::TranscriptionTransportFailed(e.to_string()))
@@ -229,21 +382,20 @@ impl GeminiLiveClient {
         let outcome = tokio::time::timeout(self.config.flush_timeout, async {
             while let Some(item) = ws_read.next().await {
                 match item {
-                    Ok(Message::Text(text)) => {
-                        match serde_json::from_str::<GeminiServerEvent>(&text) {
-                            Ok(GeminiServerEvent::SetupComplete)
-                            | Ok(GeminiServerEvent::DraftTranscript { .. })
-                            | Ok(GeminiServerEvent::FinalTranscript { .. }) => return Ok(()),
-                            Ok(GeminiServerEvent::Error { message }) => {
-                                return Err(classify_server_error(message));
-                            }
-                            Err(err) => {
-                                return Err(DictationError::TranscriptionTransportFailed(format!(
-                                    "malformed server handshake response: {err}"
-                                )));
-                            }
+                    Ok(Message::Text(text)) => match parse_server_event(&text) {
+                        Ok(Some(GeminiServerEvent::SetupComplete))
+                        | Ok(Some(GeminiServerEvent::DraftTranscript { .. }))
+                        | Ok(Some(GeminiServerEvent::FinalTranscript { .. })) => return Ok(()),
+                        Ok(Some(GeminiServerEvent::Error { message })) => {
+                            return Err(classify_server_error(message));
                         }
-                    }
+                        Ok(None) => {}
+                        Err(err) => {
+                            return Err(DictationError::TranscriptionTransportFailed(format!(
+                                "malformed server handshake response: {err}"
+                            )));
+                        }
+                    },
                     Ok(Message::Close(Some(frame))) => {
                         if frame.code == CloseCode::Normal {
                             return Ok(());
@@ -301,15 +453,35 @@ impl GeminiLiveClient {
             while let Some(cmd) = outbound_rx.recv().await {
                 match cmd {
                     OutboundCommand::AudioChunk(bytes) => {
-                        if ws_write.send(Message::Binary(bytes.into())).await.is_err() {
+                        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        let payload = RealtimeInputEnvelope {
+                            realtime_input: MediaChunksPayload {
+                                media_chunks: [MediaChunk {
+                                    mime_type: "audio/pcm;rate=16000",
+                                    data: encoded,
+                                }],
+                            },
+                        };
+                        let Ok(chunk_json) = serde_json::to_string(&payload) else {
+                            break;
+                        };
+                        if ws_write
+                            .send(Message::Text(chunk_json.into()))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
                     OutboundCommand::EndOfAudio => {
-                        let end_json = serde_json::to_string(&EndOfAudioMessage {
-                            msg_type: "end_of_audio",
-                        })
-                        .unwrap_or_else(|_| r#"{"type":"end_of_audio"}"#.to_string());
+                        let payload = RealtimeInputEnvelope {
+                            realtime_input: AudioStreamEndPayload {
+                                audio_stream_end: true,
+                            },
+                        };
+                        let end_json = serde_json::to_string(&payload).unwrap_or_else(|_| {
+                            r#"{"realtimeInput":{"audioStreamEnd":true}}"#.to_string()
+                        });
                         if ws_write.send(Message::Text(end_json.into())).await.is_err() {
                             break;
                         }
@@ -325,23 +497,22 @@ impl GeminiLiveClient {
         tokio::spawn(async move {
             while let Some(item) = ws_read.next().await {
                 match item {
-                    Ok(Message::Text(text)) => {
-                        match serde_json::from_str::<GeminiServerEvent>(&text) {
-                            Ok(event) => {
-                                if inbound_tx.send(Ok(event)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(err) => {
-                                tracing::warn!(
-                                    status = "DEGRADED",
-                                    component = "gemini",
-                                    cause = %err,
-                                    "ignoring unrecognized Gemini server message"
-                                );
+                    Ok(Message::Text(text)) => match parse_server_event(&text) {
+                        Ok(Some(event)) => {
+                            if inbound_tx.send(Ok(event)).await.is_err() {
+                                break;
                             }
                         }
-                    }
+                        Ok(None) => {}
+                        Err(err) => {
+                            tracing::warn!(
+                                status = "DEGRADED",
+                                component = "gemini",
+                                cause = %err,
+                                "ignoring unrecognized Gemini server message"
+                            );
+                        }
+                    },
                     Ok(Message::Close(Some(frame))) if frame.code != CloseCode::Normal => {
                         let _ = inbound_tx
                             .send(Err(DictationError::TranscriptionTransportFailed(format!(

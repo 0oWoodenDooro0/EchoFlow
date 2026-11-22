@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use echoflow_core::controller::{DictationController, SessionTimersConfig};
 use echoflow_core::domain::{
     ControllerEvent, DeliveryMode, DictationError, SessionState, TrayStatus,
@@ -44,36 +45,46 @@ async fn start_fake_gemini_ws_server(
             match msg {
                 Message::Text(text) => {
                     let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-                    match parsed.get("type").and_then(|v| v.as_str()) {
-                        Some("setup") => {
-                            record_clone.lock().await.setup_messages.push(parsed);
-                        }
-                        Some("end_of_audio") => {
+                    if parsed.get("setup").is_some() {
+                        record_clone.lock().await.setup_messages.push(parsed);
+                    } else if let Some(realtime) = parsed.get("realtimeInput") {
+                        if realtime.get("audioStreamEnd").and_then(|v| v.as_bool()) == Some(true) {
                             record_clone.lock().await.received_end_of_audio = true;
                             let final_msg = json!({
-                                "type": "final_transcript",
-                                "text": final_transcript,
+                                "serverContent": {
+                                    "inputTranscription": { "text": final_transcript },
+                                    "turnComplete": true,
+                                }
                             });
                             let _ = write
                                 .send(Message::Text(final_msg.to_string().into()))
                                 .await;
                             break;
-                        }
-                        _ => {}
-                    }
-                }
-                Message::Binary(bytes) => {
-                    record_clone.lock().await.pcm_bytes_received += bytes.len();
-                    if !drafts_sent {
-                        drafts_sent = true;
-                        for draft in &draft_updates {
-                            let draft_msg = json!({
-                                "type": "draft_transcript",
-                                "text": draft,
-                            });
-                            let _ = write
-                                .send(Message::Text(draft_msg.to_string().into()))
-                                .await;
+                        } else if let Some(chunks) =
+                            realtime.get("mediaChunks").and_then(|v| v.as_array())
+                        {
+                            for chunk in chunks {
+                                assert_eq!(chunk["mimeType"], "audio/pcm;rate=16000");
+                                let encoded = chunk["data"].as_str().unwrap();
+                                let decoded = base64::engine::general_purpose::STANDARD
+                                    .decode(encoded)
+                                    .unwrap();
+                                record_clone.lock().await.pcm_bytes_received += decoded.len();
+                            }
+                            if !drafts_sent {
+                                drafts_sent = true;
+                                for draft in &draft_updates {
+                                    let draft_msg = json!({
+                                        "serverContent": {
+                                            "inputTranscription": { "text": draft },
+                                            "turnComplete": false,
+                                        }
+                                    });
+                                    let _ = write
+                                        .send(Message::Text(draft_msg.to_string().into()))
+                                        .await;
+                                }
+                            }
                         }
                     }
                 }
@@ -182,11 +193,21 @@ async fn full_dictation_session_lifecycle_streams_audio_emits_draft_and_delivers
     // Verify Fake WS Server received SMART setup, PCM bytes, and end_of_audio
     let rec = server_record.lock().await;
     assert_eq!(rec.setup_messages.len(), 1);
-    assert_eq!(rec.setup_messages[0]["model"], "gemini-3.5-transcribe-live");
-    assert_eq!(rec.setup_messages[0]["mode"], "SMART");
     assert_eq!(
-        rec.setup_messages[0]["vocabulary"],
-        json!(["EchoFlow", "UniFFI"])
+        rec.setup_messages[0]["setup"]["model"],
+        "models/gemini-3.5-transcribe-live"
+    );
+    assert_eq!(
+        rec.setup_messages[0]["setup"]["generationConfig"]["responseModalities"],
+        json!(["TEXT"])
+    );
+    assert_eq!(
+        rec.setup_messages[0]["setup"]["inputAudioTranscription"]["mode"],
+        "SMART"
+    );
+    assert_eq!(
+        rec.setup_messages[0]["setup"]["systemInstruction"]["parts"][0]["text"],
+        "Preferred vocabulary terms: EchoFlow, UniFFI"
     );
     assert!(rec.pcm_bytes_received >= 16);
     assert!(rec.received_end_of_audio);
@@ -461,12 +482,22 @@ async fn paste_failure_degrades_to_fallback_delivery_without_clipboard_restore()
             while let Some(Ok(msg)) = read.next().await {
                 if let Message::Text(text) = msg {
                     let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-                    if parsed.get("type").and_then(|v| v.as_str()) == Some("end_of_audio") {
+                    if parsed
+                        .get("realtimeInput")
+                        .and_then(|r| r.get("audioStreamEnd"))
+                        .and_then(|v| v.as_bool())
+                        == Some(true)
+                    {
                         let _ = write
                             .send(Message::Text(
-                                json!({ "type": "final_transcript", "text": transcript })
-                                    .to_string()
-                                    .into(),
+                                json!({
+                                    "serverContent": {
+                                        "inputTranscription": { "text": transcript },
+                                        "turnComplete": true,
+                                    }
+                                })
+                                .to_string()
+                                .into(),
                             ))
                             .await;
                         break;
