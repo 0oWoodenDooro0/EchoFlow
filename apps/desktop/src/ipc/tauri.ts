@@ -7,6 +7,12 @@ export type DeliveryMode = "text_insertion" | "fallback_delivery" | "aborted";
 
 export type TrayStatus = "idle" | "listening" | "missing_credential" | "error";
 
+export interface AudioDeviceInfo {
+  id: string;
+  name: string;
+  is_default: boolean;
+}
+
 export type SessionState =
   | { kind: "idle" }
   | { kind: "connecting" }
@@ -48,6 +54,18 @@ export async function simulateHotkeyRelease(): Promise<string | null> {
 
 export async function cancelDictationSession(): Promise<void> {
   return invoke<void>("cancel_dictation_session");
+}
+
+export async function listAudioDevices(): Promise<AudioDeviceInfo[]> {
+  return invoke<AudioDeviceInfo[]>("list_audio_devices");
+}
+
+export async function getSelectedMicrophone(): Promise<string | null> {
+  return invoke<string | null>("get_selected_microphone");
+}
+
+export async function selectMicrophone(deviceId: string | null): Promise<void> {
+  return invoke<void>("select_microphone", { deviceId });
 }
 
 export async function subscribeControllerEvents(

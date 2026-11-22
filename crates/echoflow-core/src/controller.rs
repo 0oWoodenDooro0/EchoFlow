@@ -7,10 +7,13 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use crate::audio::{compute_normalized_rms, normalize_frame_to_16khz_mono, pcm_i16_to_le_bytes};
+use crate::audio::{
+    compute_normalized_rms, pcm_i16_to_le_bytes, AudioResampler, DEFAULT_CHUNK_SAMPLES,
+};
 use crate::delivery::DeliveryService;
 use crate::domain::{
-    ControllerEvent, DeliveryMode, DictationError, HistoryEntry, SessionState, TrayStatus,
+    AudioDeviceInfo, ControllerEvent, DeliveryMode, DictationError, HistoryEntry, SessionState,
+    TrayStatus,
 };
 use crate::gemini::{GeminiLiveClient, GeminiServerEvent, GeminiSessionSender};
 use crate::platform::PlatformAdapter;
@@ -58,7 +61,7 @@ pub struct DictationController {
     delivery: DeliveryService,
     timers: SessionTimersConfig,
     events_tx: broadcast::Sender<ControllerEvent>,
-    inner: Mutex<ControllerInner>,
+    inner: Arc<Mutex<ControllerInner>>,
 }
 
 impl DictationController {
@@ -77,11 +80,31 @@ impl DictationController {
             delivery,
             timers,
             events_tx,
-            inner: Mutex::new(ControllerInner {
+            inner: Arc::new(Mutex::new(ControllerInner {
                 state: SessionState::Idle,
                 active_session: None,
-            }),
+            })),
         }
+    }
+
+    /// Enumerate available microphone input devices from the platform adapter.
+    pub async fn list_audio_devices(&self) -> Result<Vec<AudioDeviceInfo>, DictationError> {
+        self.platform.list_audio_devices().await
+    }
+
+    /// Read the persisted microphone preference (`None` means OS default).
+    pub async fn get_selected_microphone(&self) -> Result<Option<String>, DictationError> {
+        Ok(self.store.get_preferences().await?.microphone_id)
+    }
+
+    /// Persist the selected microphone preference (`None` means OS default).
+    pub async fn set_selected_microphone(
+        &self,
+        device_id: Option<String>,
+    ) -> Result<(), DictationError> {
+        let mut prefs = self.store.get_preferences().await?;
+        prefs.microphone_id = device_id.filter(|id| !id.trim().is_empty());
+        self.store.save_preferences(&prefs).await
     }
 
     /// Subscribe to observable `ControllerEvent` updates.
@@ -160,6 +183,18 @@ impl DictationController {
         let prefs = self.store.get_preferences().await.unwrap_or_default();
         let vocabulary = self.store.list_vocabulary_terms().await.unwrap_or_default();
 
+        let target_device_id = match self
+            .resolve_microphone_id(prefs.microphone_id.as_deref())
+            .await
+        {
+            Ok(id) => id,
+            Err(err) => {
+                self.transition_to_error(err.to_string(), TrayStatus::Error)
+                    .await;
+                return Err(err);
+            }
+        };
+
         let session = match self.gemini.connect(&api_key, &vocabulary).await {
             Ok(session) => session,
             Err(err) => {
@@ -169,34 +204,85 @@ impl DictationController {
             }
         };
 
+        let (gemini_tx, mut gemini_rx) = session.split();
+
         let mut audio_rx = match self
             .platform
-            .start_audio_capture(prefs.microphone_id.as_deref())
+            .start_audio_capture(target_device_id.as_deref())
             .await
         {
             Ok(rx) => rx,
             Err(err) => {
+                gemini_tx.close().await;
                 self.transition_to_error(err.to_string(), TrayStatus::Error)
                     .await;
                 return Err(err);
             }
         };
 
-        let (gemini_tx, mut gemini_rx) = session.split();
         let audio_gemini_tx = gemini_tx.clone();
         let audio_events_tx = self.events_tx.clone();
+        let audio_inner = Arc::clone(&self.inner);
 
         let audio_task = tokio::spawn(async move {
+            let mut resampler = AudioResampler::new(DEFAULT_CHUNK_SAMPLES);
+            let mut transport_failed = false;
+
             while let Some(frame) = audio_rx.recv().await {
-                let mono_16k = normalize_frame_to_16khz_mono(&frame);
-                if mono_16k.is_empty() {
-                    continue;
+                for chunk in resampler.push_frame_immediate(&frame) {
+                    let rms = compute_normalized_rms(&chunk);
+                    let _ = audio_events_tx.send(ControllerEvent::AudioLevelUpdated { rms });
+                    let pcm_bytes = pcm_i16_to_le_bytes(&chunk);
+                    if audio_gemini_tx.send_audio_chunk(pcm_bytes).await.is_err() {
+                        transport_failed = true;
+                        break;
+                    }
                 }
-                let rms = compute_normalized_rms(&mono_16k);
-                let _ = audio_events_tx.send(ControllerEvent::AudioLevelUpdated { rms });
-                let pcm_bytes = pcm_i16_to_le_bytes(&mono_16k);
-                if audio_gemini_tx.send_audio_chunk(pcm_bytes).await.is_err() {
+                if transport_failed {
                     break;
+                }
+            }
+
+            if !transport_failed {
+                // `audio_rx` closed while the session was still active -> microphone disconnected.
+                let disconnected_session = {
+                    let mut guard = audio_inner.lock().await;
+                    if matches!(
+                        guard.state,
+                        SessionState::Connecting | SessionState::Listening
+                    ) {
+                        let message =
+                            "microphone disconnected during Dictation Session".to_string();
+                        guard.state = SessionState::Error {
+                            message: message.clone(),
+                        };
+                        Some((guard.active_session.take(), message))
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some((maybe_session, message)) = disconnected_session {
+                    tracing::warn!(
+                        status = "DEGRADED",
+                        component = "audio",
+                        cause = %message,
+                        "microphone stream ended unexpectedly during active Dictation Session"
+                    );
+                    if let Some(active) = maybe_session {
+                        active.server_task.abort();
+                        active.timer_task.abort();
+                        active.gemini_tx.close().await;
+                    }
+                    let _ = audio_events_tx.send(ControllerEvent::StateChanged {
+                        state: SessionState::Error {
+                            message: message.clone(),
+                        },
+                    });
+                    let _ = audio_events_tx.send(ControllerEvent::ErrorOccurred { message });
+                    let _ = audio_events_tx.send(ControllerEvent::TrayStatusChanged {
+                        status: TrayStatus::Error,
+                    });
                 }
             }
         });
@@ -386,6 +472,39 @@ impl DictationController {
 
         self.set_state(SessionState::Idle).await;
         Ok(())
+    }
+
+    async fn resolve_microphone_id(
+        &self,
+        preferred_id: Option<&str>,
+    ) -> Result<Option<String>, DictationError> {
+        let devices = self.platform.list_audio_devices().await?;
+        if devices.is_empty() {
+            return Err(DictationError::AudioCaptureFailed(
+                "no microphone input device available".to_string(),
+            ));
+        }
+
+        match preferred_id {
+            Some(id) if devices.iter().any(|d| d.id == id) => Ok(Some(id.to_string())),
+            Some(missing_id) => {
+                let fallback_name = devices
+                    .iter()
+                    .find(|d| d.is_default)
+                    .or_else(|| devices.first())
+                    .map(|d| d.name.as_str())
+                    .unwrap_or("OS default");
+                tracing::warn!(
+                    status = "DEGRADED",
+                    component = "audio",
+                    requested_device = %missing_id,
+                    fallback_device = %fallback_name,
+                    "selected microphone is no longer connected; falling back to OS default microphone"
+                );
+                Ok(None)
+            }
+            None => Ok(None),
+        }
     }
 
     async fn transition_to_error(&self, message: String, tray_status: TrayStatus) {

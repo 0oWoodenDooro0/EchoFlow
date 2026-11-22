@@ -124,4 +124,35 @@ describe("OverlayPill at Tauri IPC boundary", () => {
     expect(pill).toHaveTextContent(/copied to clipboard/i);
     expect(pill).toHaveTextContent("Text Insertion unavailable on Wayland");
   });
+
+  it("clamps live waveform RMS audio levels strictly to [0.0, 1.0]", async () => {
+    render(<OverlayPill />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    emitControllerEvent({
+      type: "state_changed",
+      state: { kind: "listening" },
+    });
+
+    emitControllerEvent({
+      type: "audio_level_updated",
+      rms: 1.8,
+    });
+    const waveform = screen.getByLabelText("Audio waveform");
+    expect(waveform).toHaveAttribute("data-rms", "1.00");
+
+    emitControllerEvent({
+      type: "audio_level_updated",
+      rms: -0.4,
+    });
+    expect(waveform).toHaveAttribute("data-rms", "0.00");
+
+    emitControllerEvent({
+      type: "audio_level_updated",
+      rms: 0.5,
+    });
+    expect(waveform).toHaveAttribute("data-rms", "0.50");
+  });
 });
