@@ -518,24 +518,9 @@ impl GeminiLiveClient {
         tokio::spawn(async move {
             while let Some(item) = ws_read.next().await {
                 match item {
-                    Ok(Message::Text(text)) => match parse_server_event(&text) {
-                        Ok(Some(event)) => {
-                            if inbound_tx.send(Ok(event)).await.is_err() {
-                                break;
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            tracing::warn!(
-                                status = "DEGRADED",
-                                component = "gemini",
-                                cause = %err,
-                                "ignoring unrecognized Gemini server message"
-                            );
-                        }
-                    },
-                    Ok(Message::Binary(bytes)) => match std::str::from_utf8(&bytes) {
-                        Ok(text) => match parse_server_event(text) {
+                    Ok(Message::Text(text)) => {
+                        tracing::debug!(component = "gemini", raw = %text, "received Gemini text frame");
+                        match parse_server_event(&text) {
                             Ok(Some(event)) => {
                                 if inbound_tx.send(Ok(event)).await.is_err() {
                                     break;
@@ -547,10 +532,33 @@ impl GeminiLiveClient {
                                     status = "DEGRADED",
                                     component = "gemini",
                                     cause = %err,
-                                    "ignoring unrecognized Gemini binary server message"
+                                    raw = %text,
+                                    "ignoring unrecognized Gemini server message"
                                 );
                             }
-                        },
+                        }
+                    }
+                    Ok(Message::Binary(bytes)) => match std::str::from_utf8(&bytes) {
+                        Ok(text) => {
+                            tracing::debug!(component = "gemini", raw = %text, "received Gemini binary frame");
+                            match parse_server_event(text) {
+                                Ok(Some(event)) => {
+                                    if inbound_tx.send(Ok(event)).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(err) => {
+                                    tracing::warn!(
+                                        status = "DEGRADED",
+                                        component = "gemini",
+                                        cause = %err,
+                                        raw = %text,
+                                        "ignoring unrecognized Gemini binary server message"
+                                    );
+                                }
+                            }
+                        }
                         Err(err) => {
                             tracing::warn!(
                                 status = "DEGRADED",

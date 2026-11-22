@@ -111,8 +111,9 @@ async fn bind_and_forward_hotkey(
     let controller_clone = Arc::clone(controller);
     tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
+            tracing::info!(?event, "received global hotkey event");
             if let Err(err) = controller_clone.handle_hotkey_event(event).await {
-                tracing::debug!(error = %err, "hotkey event ignored or failed");
+                tracing::warn!(error = %err, "hotkey event ignored or failed");
             }
         }
     });
@@ -489,6 +490,13 @@ fn open_desktop_local_store() -> SqliteLocalStore {
 }
 
 pub fn run() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,echoflow_core=debug,echoflow_desktop_lib=debug".into()),
+        )
+        .try_init();
+
     let platform = Arc::new(DesktopPlatformAdapter::default());
     let store: Arc<dyn LocalStore> = Arc::new(open_desktop_local_store());
     let gemini = GeminiLiveClient::new(GeminiClientConfig::default());

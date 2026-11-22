@@ -494,6 +494,78 @@ pub fn start_global_hotkey_listener(
         return Ok((rx, HotkeyListenerHandle { stop_flag }));
     }
 
+    let (raw_tx, raw_rx) = std::sync::mpsc::channel::<(bool, NormalizedKey)>();
+    let stop_for_processor = Arc::clone(&stop_clone);
+    let matcher_for_processor = Arc::clone(&matcher);
+
+    // Process `rdev` key events with a 40ms release debounce to filter X11 key auto-repeat
+    // (which emits synthetic KeyRelease + KeyPress pairs back-to-back while a key is held).
+    std::thread::spawn(move || {
+        let mut pending_release_key: Option<NormalizedKey> = None;
+        loop {
+            if stop_for_processor.load(Ordering::SeqCst) {
+                break;
+            }
+            let next = if pending_release_key.is_some() {
+                match raw_rx.recv_timeout(std::time::Duration::from_millis(40)) {
+                    Ok(ev) => Some(ev),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if let Some(released_key) = pending_release_key.take() {
+                            if let Ok(mut guard) = matcher_for_processor.lock() {
+                                if let Some(hotkey_event) = guard.on_key_release(released_key) {
+                                    let _ = tx.try_send(hotkey_event);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            } else {
+                match raw_rx.recv() {
+                    Ok(ev) => Some(ev),
+                    Err(_) => break,
+                }
+            };
+
+            let Some((is_press, norm_key)) = next else {
+                continue;
+            };
+
+            if is_press {
+                if pending_release_key.as_ref() == Some(&norm_key) {
+                    // X11 auto-repeat: KeyPress immediately followed KeyRelease for the same key.
+                    pending_release_key = None;
+                    continue;
+                }
+                if let Some(released_key) = pending_release_key.take() {
+                    if let Ok(mut guard) = matcher_for_processor.lock() {
+                        if let Some(hotkey_event) = guard.on_key_release(released_key) {
+                            let _ = tx.try_send(hotkey_event);
+                        }
+                    }
+                }
+                if let Ok(mut guard) = matcher_for_processor.lock() {
+                    if let Some(hotkey_event) = guard.on_key_press(norm_key) {
+                        let _ = tx.try_send(hotkey_event);
+                    }
+                }
+            } else {
+                let should_debounce = matcher_for_processor
+                    .lock()
+                    .map(|guard| guard.is_active)
+                    .unwrap_or(false);
+                if should_debounce {
+                    pending_release_key = Some(norm_key);
+                } else if let Ok(mut guard) = matcher_for_processor.lock() {
+                    if let Some(hotkey_event) = guard.on_key_release(norm_key) {
+                        let _ = tx.try_send(hotkey_event);
+                    }
+                }
+            }
+        }
+    });
+
     std::thread::spawn(move || {
         let listen_result = rdev::listen(move |event| {
             if stop_clone.load(Ordering::SeqCst) {
@@ -507,19 +579,7 @@ pub fn start_global_hotkey_listener(
             let Some(norm_key) = map_rdev_key(raw_key) else {
                 return;
             };
-            let maybe_event = {
-                let Ok(mut guard) = matcher.lock() else {
-                    return;
-                };
-                if is_press {
-                    guard.on_key_press(norm_key)
-                } else {
-                    guard.on_key_release(norm_key)
-                }
-            };
-            if let Some(hotkey_event) = maybe_event {
-                let _ = tx.try_send(hotkey_event);
-            }
+            let _ = raw_tx.send((is_press, norm_key));
         });
 
         if let Err(err) = listen_result {
