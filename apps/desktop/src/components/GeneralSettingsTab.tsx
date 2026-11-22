@@ -136,10 +136,14 @@ function formatKeyEventToBinding(e: KeyboardEvent): string | null {
   return parts.join("+");
 }
 
+const MIN_HISTORY_RETENTION_DAYS = 1;
+const MAX_HISTORY_RETENTION_DAYS = 3650;
+
 export function GeneralSettingsTab() {
   const [hotkey, setHotkey] = useState("Alt+Space");
   const [restoreClipboard, setRestoreClipboard] = useState(true);
   const [restoreDelayMs, setRestoreDelayMs] = useState(150);
+  const [historyRetentionDays, setHistoryRetentionDays] = useState(30);
   const [isRecording, setIsRecording] = useState(false);
   const [capabilities, setCapabilities] = useState<PlatformCapabilities | null>(
     null,
@@ -159,6 +163,7 @@ export function GeneralSettingsTab() {
         setHotkey(prefs.push_to_talk_hotkey);
         setRestoreClipboard(prefs.restore_clipboard);
         setRestoreDelayMs(prefs.clipboard_restore_delay_ms);
+        setHistoryRetentionDays(prefs.history_retention_days);
         setCapabilities(caps);
       } catch (err) {
         if (!active) return;
@@ -214,16 +219,29 @@ export function GeneralSettingsTab() {
       return;
     }
 
+    if (
+      !Number.isInteger(historyRetentionDays) ||
+      historyRetentionDays < MIN_HISTORY_RETENTION_DAYS ||
+      historyRetentionDays > MAX_HISTORY_RETENTION_DAYS
+    ) {
+      setError(
+        `History retention must be a whole number between ${MIN_HISTORY_RETENTION_DAYS} and ${MAX_HISTORY_RETENTION_DAYS} days.`,
+      );
+      return;
+    }
+
     setError(null);
     try {
       const updated = await saveGeneralSettings({
         push_to_talk_hotkey: validation.normalized,
         restore_clipboard: restoreClipboard,
         clipboard_restore_delay_ms: restoreDelayMs,
+        history_retention_days: historyRetentionDays,
       });
       setHotkey(updated.push_to_talk_hotkey);
       setRestoreClipboard(updated.restore_clipboard);
       setRestoreDelayMs(updated.clipboard_restore_delay_ms);
+      setHistoryRetentionDays(updated.history_retention_days);
       setSavedNotice("Settings saved.");
     } catch (err) {
       setError(String(err));
@@ -315,6 +333,32 @@ export function GeneralSettingsTab() {
             />
           </div>
         )}
+      </div>
+
+      <div className="space-y-2 border-t border-slate-800 pt-4">
+        <label
+          htmlFor="history-retention-days"
+          className="block text-sm font-medium text-slate-200"
+        >
+          History retention (days)
+        </label>
+        <div className="flex items-center gap-2">
+          <input
+            id="history-retention-days"
+            type="number"
+            min={MIN_HISTORY_RETENTION_DAYS}
+            max={MAX_HISTORY_RETENTION_DAYS}
+            value={historyRetentionDays}
+            onChange={(e) => {
+              setHistoryRetentionDays(Number(e.target.value));
+              setSavedNotice(null);
+            }}
+            className="w-28 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-white focus:border-sky-500 focus:outline-none"
+          />
+          <span className="text-xs text-slate-400">
+            Entries older than this are pruned automatically (1–3650 days).
+          </span>
+        </div>
       </div>
 
       {error && (

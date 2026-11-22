@@ -779,10 +779,21 @@ async fn hard_cap_at_10_00_degrades_to_fallback_delivery_when_paste_fails() {
 
     tokio::time::advance(Duration::from_secs(10 * 60)).await;
 
+    let mut saw_fallback_state = false;
     let mut saw_fallback = false;
-    let mut saw_idle = false;
-    while !saw_idle {
+    while !saw_fallback {
         match events.recv().await.unwrap() {
+            ControllerEvent::StateChanged {
+                state:
+                    SessionState::FallbackNotice {
+                        final_transcript,
+                        reason,
+                    },
+            } => {
+                assert_eq!(final_transcript, "Long session final transcript.");
+                assert!(reason.contains("no focused input field"));
+                saw_fallback_state = true;
+            }
             ControllerEvent::FallbackDeliveryNoticed {
                 final_transcript,
                 reason,
@@ -791,14 +802,16 @@ async fn hard_cap_at_10_00_degrades_to_fallback_delivery_when_paste_fails() {
                 assert!(reason.contains("no focused input field"));
                 saw_fallback = true;
             }
-            ControllerEvent::StateChanged {
-                state: SessionState::Idle,
-            } => saw_idle = true,
             _ => {}
         }
     }
 
+    assert!(saw_fallback_state);
     assert!(saw_fallback);
+    assert!(matches!(
+        controller.state().await,
+        SessionState::FallbackNotice { .. }
+    ));
     assert_eq!(
         fake_platform.current_clipboard().as_deref(),
         Some("Long session final transcript.")

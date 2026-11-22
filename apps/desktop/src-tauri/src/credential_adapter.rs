@@ -1,5 +1,3 @@
-use std::process::Command;
-
 use echoflow_core::domain::{
     DictationError, DisplayServer, PermissionStatus, PlatformCapabilities,
 };
@@ -88,53 +86,75 @@ pub async fn delete_provider_credential() -> Result<(), DictationError> {
     .map_err(|err| DictationError::CredentialStoreFailed(err.to_string()))?
 }
 
-/// Probe OS display server, macOS permissions, Linux Wayland helpers, and Secret Service availability.
-pub async fn probe_platform_capabilities() -> Result<PlatformCapabilities, DictationError> {
-    tokio::task::spawn_blocking(|| {
-        let display_server = detect_display_server();
-        let secret_service_available = check_keyring_available();
-        let wayland_helpers = if display_server == DisplayServer::LinuxWayland {
-            detect_wayland_helpers()
-        } else {
-            Vec::new()
-        };
+/// Synchronous single-source-of-truth probe for OS display server, macOS permissions,
+/// Linux Wayland helpers (`evdev` readable `/dev/input/event*`, `ydotool`, `wtype`),
+/// and Secret Service / native keyring availability.
+pub fn probe_platform_capabilities_sync() -> PlatformCapabilities {
+    let secret_service_available = check_keyring_available();
 
-        let (microphone_permission, accessibility_permission) =
-            if display_server == DisplayServer::MacOs {
-                (
-                    probe_macos_microphone_permission(),
-                    probe_macos_accessibility_permission(),
-                )
-            } else {
-                (
-                    PermissionStatus::NotApplicable,
-                    PermissionStatus::NotApplicable,
-                )
-            };
-
-        let supports_global_hotkey = match display_server {
-            DisplayServer::LinuxWayland => wayland_helpers.iter().any(|h| h == "evdev"),
-            _ => true,
-        };
-        let supports_text_insertion = match display_server {
-            DisplayServer::LinuxWayland => wayland_helpers
-                .iter()
-                .any(|h| h == "ydotool" || h == "wtype"),
-            _ => true,
-        };
-
-        Ok(PlatformCapabilities {
-            display_server,
-            microphone_permission,
-            accessibility_permission,
-            supports_global_hotkey,
-            supports_text_insertion,
-            wayland_helpers,
+    #[cfg(target_os = "macos")]
+    {
+        return PlatformCapabilities {
+            display_server: DisplayServer::MacOs,
+            microphone_permission: probe_macos_microphone_permission(),
+            accessibility_permission: probe_macos_accessibility_permission(),
+            supports_global_hotkey: true,
+            supports_text_insertion: true,
+            wayland_helpers: Vec::new(),
             secret_service_available,
-        })
-    })
-    .await
-    .map_err(|err| DictationError::CredentialStoreFailed(err.to_string()))?
+        };
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return PlatformCapabilities {
+            display_server: DisplayServer::Windows,
+            microphone_permission: PermissionStatus::NotApplicable,
+            accessibility_permission: PermissionStatus::NotApplicable,
+            supports_global_hotkey: true,
+            supports_text_insertion: true,
+            wayland_helpers: Vec::new(),
+            secret_service_available,
+        };
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let xdg = std::env::var("XDG_SESSION_TYPE").ok();
+        let wayland = std::env::var("WAYLAND_DISPLAY").ok();
+        let display = std::env::var("DISPLAY").ok();
+        let has_evdev = crate::hotkey_adapter::has_readable_evdev();
+        let has_ydotool = crate::hotkey_adapter::command_exists("ydotool")
+            && std::path::Path::new("/dev/uinput").exists();
+        let has_wtype = crate::hotkey_adapter::command_exists("wtype");
+        return crate::hotkey_adapter::probe_linux_capabilities_from_env(
+            xdg.as_deref(),
+            wayland.as_deref(),
+            display.as_deref(),
+            has_evdev,
+            has_ydotool,
+            has_wtype,
+            secret_service_available,
+        );
+    }
+
+    #[allow(unreachable_code)]
+    PlatformCapabilities {
+        display_server: DisplayServer::Unknown,
+        microphone_permission: PermissionStatus::NotApplicable,
+        accessibility_permission: PermissionStatus::NotApplicable,
+        supports_global_hotkey: false,
+        supports_text_insertion: false,
+        wayland_helpers: Vec::new(),
+        secret_service_available,
+    }
+}
+
+/// Async wrapper for `probe_platform_capabilities_sync`.
+pub async fn probe_platform_capabilities() -> Result<PlatformCapabilities, DictationError> {
+    tokio::task::spawn_blocking(probe_platform_capabilities_sync)
+        .await
+        .map_err(|err| DictationError::CredentialStoreFailed(err.to_string()))
 }
 
 /// Open macOS System Settings directly to the Microphone or Accessibility privacy pane.
@@ -150,7 +170,7 @@ pub fn open_permission_settings(target: &str) -> Result<(), String> {
             }
             other => return Err(format!("unknown permission settings target: {other}")),
         };
-        Command::new("open")
+        std::process::Command::new("open")
             .arg(uri)
             .spawn()
             .map_err(|err| format!("failed to open macOS System Settings: {err}"))?;
@@ -161,29 +181,6 @@ pub fn open_permission_settings(target: &str) -> Result<(), String> {
     {
         let _ = target;
         Ok(())
-    }
-}
-
-fn detect_display_server() -> DisplayServer {
-    if cfg!(target_os = "macos") {
-        DisplayServer::MacOs
-    } else if cfg!(target_os = "windows") {
-        DisplayServer::Windows
-    } else if cfg!(target_os = "linux") {
-        let session_type = std::env::var("XDG_SESSION_TYPE")
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
-        let has_x11 = std::env::var_os("DISPLAY").is_some();
-        if session_type == "wayland" || has_wayland {
-            DisplayServer::LinuxWayland
-        } else if session_type == "x11" || has_x11 {
-            DisplayServer::LinuxX11
-        } else {
-            DisplayServer::Unknown
-        }
-    } else {
-        DisplayServer::Unknown
     }
 }
 
@@ -201,38 +198,58 @@ fn check_keyring_available() -> bool {
     }
 }
 
-fn detect_wayland_helpers() -> Vec<String> {
-    let mut helpers = Vec::new();
-    for cmd in ["ydotool", "wtype"] {
-        if Command::new("which")
-            .arg(cmd)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            helpers.push(cmd.to_string());
-        }
-    }
-    if std::path::Path::new("/dev/input").exists() {
-        helpers.push("evdev".to_string());
-    }
-    helpers
-}
-
 #[cfg(target_os = "macos")]
 fn probe_macos_microphone_permission() -> PermissionStatus {
-    // Detailed AVFoundation authorization probing can be wired via objc2/CoreMedia in macOS builds;
-    // default to NotDetermined until user grants in System Settings.
-    PermissionStatus::NotDetermined
-}
+    use std::ffi::{c_char, c_void};
 
-#[cfg(not(target_os = "macos"))]
-fn probe_macos_microphone_permission() -> PermissionStatus {
-    PermissionStatus::NotApplicable
+    #[link(name = "AVFoundation", kind = "framework")]
+    extern "C" {}
+    #[link(name = "Foundation", kind = "framework")]
+    extern "C" {}
+    #[link(name = "objc", kind = "dylib")]
+    extern "C" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend();
+    }
+
+    // SAFETY: Queries `[AVCaptureDevice authorizationStatusForMediaType:@"soun"]` via the
+    // Objective-C runtime with exact ABI function pointer casts.
+    unsafe {
+        let av_capture_device = objc_getClass(b"AVCaptureDevice\0".as_ptr().cast::<c_char>());
+        let ns_string_cls = objc_getClass(b"NSString\0".as_ptr().cast::<c_char>());
+        if av_capture_device.is_null() || ns_string_cls.is_null() {
+            return PermissionStatus::NotDetermined;
+        }
+
+        let str_sel = sel_registerName(b"stringWithUTF8String:\0".as_ptr().cast::<c_char>());
+        let status_sel = sel_registerName(
+            b"authorizationStatusForMediaType:\0"
+                .as_ptr()
+                .cast::<c_char>(),
+        );
+
+        let msg_send_str: extern "C" fn(*mut c_void, *mut c_void, *const c_char) -> *mut c_void =
+            std::mem::transmute(objc_msgSend as *const c_void);
+        let media_type = msg_send_str(ns_string_cls, str_sel, b"soun\0".as_ptr().cast::<c_char>());
+        if media_type.is_null() {
+            return PermissionStatus::NotDetermined;
+        }
+
+        let msg_send_status: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> isize =
+            std::mem::transmute(objc_msgSend as *const c_void);
+        match msg_send_status(av_capture_device, status_sel, media_type) {
+            0 => PermissionStatus::NotDetermined,
+            1 | 2 => PermissionStatus::Denied,
+            3 => PermissionStatus::Granted,
+            _ => PermissionStatus::NotDetermined,
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
 fn probe_macos_accessibility_permission() -> PermissionStatus {
+    #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
         fn AXIsProcessTrusted() -> bool;
     }
@@ -243,9 +260,4 @@ fn probe_macos_accessibility_permission() -> PermissionStatus {
     } else {
         PermissionStatus::Denied
     }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn probe_macos_accessibility_permission() -> PermissionStatus {
-    PermissionStatus::NotApplicable
 }

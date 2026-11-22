@@ -140,6 +140,7 @@ async fn start_recording_ws_server(
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut seen_header = None;
+        #[allow(clippy::result_large_err)]
         let ws_stream = tokio_tungstenite::accept_hdr_async(
             stream,
             |req: &tokio_tungstenite::tungstenite::handshake::server::Request, resp| {

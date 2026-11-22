@@ -36,7 +36,8 @@ export function OverlayPill() {
           if (
             event.state.kind === "idle" ||
             event.state.kind === "connecting" ||
-            event.state.kind === "error"
+            event.state.kind === "error" ||
+            event.state.kind === "fallback_notice"
           ) {
             setDraftTranscript("");
             setAudioLevel(0);

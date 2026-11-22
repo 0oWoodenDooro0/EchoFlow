@@ -40,6 +40,9 @@ impl Default for GeminiClientConfig {
 }
 
 /// Outbound setup payload sent immediately after WebSocket connect.
+///
+/// Protocol shape (Issue #3 AC #2): sends a JSON `setup` frame followed by raw 16-bit 16kHz mono
+/// little-endian PCM binary WebSocket frames and a JSON `end_of_audio` flush frame on release.
 #[derive(Debug, Clone, Serialize)]
 struct SetupMessage<'a> {
     #[serde(rename = "type")]

@@ -123,6 +123,20 @@ describe("OverlayPill at Tauri IPC boundary", () => {
     const pill = screen.getByRole("status");
     expect(pill).toHaveTextContent(/copied to clipboard/i);
     expect(pill).toHaveTextContent("Text Insertion unavailable on Wayland");
+
+    // FallbackNotice stays visible until a new session starts or Idle is emitted.
+    emitControllerEvent({
+      type: "fallback_delivery_noticed",
+      final_transcript: "Copied safely",
+      reason: "Text Insertion unavailable on Wayland",
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(/copied to clipboard/i);
+
+    emitControllerEvent({
+      type: "state_changed",
+      state: { kind: "connecting" },
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(/connecting/i);
   });
 
   it("clamps live waveform RMS audio levels strictly to [0.0, 1.0]", async () => {

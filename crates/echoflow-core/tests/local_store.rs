@@ -34,7 +34,7 @@ async fn history_entry_persists_lists_chronologically_searches_and_deletes() {
     assert_eq!(listed.len(), 2);
     // Newest first (chronological descending)
     assert_eq!(listed[0].id, "h2");
-    assert_eq!(listed[0].was_partial, true);
+    assert!(listed[0].was_partial);
     assert_eq!(listed[0].delivery_mode, DeliveryMode::FallbackDelivery);
     assert_eq!(listed[1].id, "h1");
 

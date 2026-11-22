@@ -38,6 +38,7 @@ describe("GeneralSettingsTab at Tauri IPC boundary", () => {
           push_to_talk_hotkey: string;
           restore_clipboard: boolean;
           clipboard_restore_delay_ms: number;
+          history_retention_days: number;
         };
         return {
           ...defaultPrefs,
@@ -74,6 +75,7 @@ describe("GeneralSettingsTab at Tauri IPC boundary", () => {
         push_to_talk_hotkey: "Ctrl+Shift+Space",
         restore_clipboard: true,
         clipboard_restore_delay_ms: 150,
+        history_retention_days: 30,
       });
     });
 
@@ -131,6 +133,7 @@ describe("GeneralSettingsTab at Tauri IPC boundary", () => {
           push_to_talk_hotkey: string;
           restore_clipboard: boolean;
           clipboard_restore_delay_ms: number;
+          history_retention_days: number;
         };
         return {
           ...defaultPrefs,
@@ -161,7 +164,50 @@ describe("GeneralSettingsTab at Tauri IPC boundary", () => {
         push_to_talk_hotkey: "Alt+Space",
         restore_clipboard: false,
         clipboard_restore_delay_ms: 150,
+        history_retention_days: 30,
       });
     });
+  });
+
+  it("validates and persists history_retention_days via save_general_settings", async () => {
+    render(<GeneralSettingsTab />);
+
+    const retentionInput = await screen.findByLabelText(
+      /history retention \(days\)/i,
+    );
+    expect(retentionInput).toHaveValue(30);
+
+    // Out of range (0) is rejected
+    fireEvent.change(retentionInput, { target: { value: "0" } });
+    fireEvent.submit(retentionInput.closest("form")!);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/between 1 and 3650/i);
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "save_general_settings",
+      expect.anything(),
+    );
+
+    // Out of range (> 3650) is rejected
+    fireEvent.change(retentionInput, { target: { value: "4000" } });
+    fireEvent.submit(retentionInput.closest("form")!);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/between 1 and 3650/i);
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "save_general_settings",
+      expect.anything(),
+    );
+
+    // Valid value (90) is persisted
+    fireEvent.change(retentionInput, { target: { value: "90" } });
+    fireEvent.submit(retentionInput.closest("form")!);
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("save_general_settings", {
+        push_to_talk_hotkey: "Alt+Space",
+        restore_clipboard: true,
+        clipboard_restore_delay_ms: 150,
+        history_retention_days: 90,
+      });
+    });
+
+    expect(await screen.findByText(/settings saved/i)).toBeInTheDocument();
   });
 });

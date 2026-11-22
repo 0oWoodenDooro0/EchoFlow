@@ -284,16 +284,16 @@ impl SessionRuntime {
             let reason = outcome
                 .fallback_reason
                 .unwrap_or_else(|| "Text Insertion unavailable".to_string());
-            self.emit(ControllerEvent::StateChanged {
-                state: SessionState::FallbackNotice {
-                    final_transcript: trimmed.to_string(),
-                    reason: reason.clone(),
-                },
-            });
+            self.set_state(SessionState::FallbackNotice {
+                final_transcript: trimmed.to_string(),
+                reason: reason.clone(),
+            })
+            .await;
             self.emit(ControllerEvent::FallbackDeliveryNoticed {
                 final_transcript: trimmed.to_string(),
                 reason,
             });
+            return Ok(Some(trimmed.to_string()));
         }
 
         self.set_state(SessionState::Idle).await;

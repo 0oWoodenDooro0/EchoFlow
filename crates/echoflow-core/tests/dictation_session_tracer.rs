@@ -413,20 +413,101 @@ async fn paste_failure_degrades_to_fallback_delivery_without_clipboard_restore()
     );
 
     let mut saw_fallback_event = false;
+    let mut saw_idle_after_fallback = false;
     while let Ok(evt) = events.try_recv() {
-        if let ControllerEvent::FallbackDeliveryNoticed {
-            final_transcript,
-            reason,
-        } = evt
-        {
-            assert_eq!(final_transcript, "Fallback transcript.");
-            assert!(reason.contains("wayland compositor blocked paste"));
-            saw_fallback_event = true;
+        match evt {
+            ControllerEvent::FallbackDeliveryNoticed {
+                final_transcript,
+                reason,
+            } => {
+                assert_eq!(final_transcript, "Fallback transcript.");
+                assert!(reason.contains("wayland compositor blocked paste"));
+                saw_fallback_event = true;
+            }
+            ControllerEvent::StateChanged {
+                state: SessionState::Idle,
+            } if saw_fallback_event => {
+                saw_idle_after_fallback = true;
+            }
+            _ => {}
         }
     }
     assert!(saw_fallback_event);
+    assert!(
+        !saw_idle_after_fallback,
+        "FallbackNotice must remain active and not be immediately overwritten by Idle"
+    );
+    assert!(matches!(
+        controller.state().await,
+        SessionState::FallbackNotice {
+            ref final_transcript,
+            ref reason,
+        } if final_transcript == "Fallback transcript."
+            && reason.contains("wayland compositor blocked paste")
+    ));
 
     let history = store.list_history_entries().await.unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].delivery_mode, DeliveryMode::FallbackDelivery);
+
+    // Starting a new Dictation Session from FallbackNotice succeeds cleanly.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        for transcript in ["First fallback.", "Second ok."] {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws_stream = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut write, mut read) = ws_stream.split();
+            while let Some(Ok(msg)) = read.next().await {
+                if let Message::Text(text) = msg {
+                    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if parsed.get("type").and_then(|v| v.as_str()) == Some("end_of_audio") {
+                        let _ = write
+                            .send(Message::Text(
+                                json!({ "type": "final_transcript", "text": transcript })
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    let next_platform = Arc::new(FakePlatformAdapter::new());
+    next_platform.set_credential_sync(Some("test-key".to_string()));
+    next_platform.set_fail_paste(Some("blocked once".to_string()));
+    next_platform.enqueue_audio_frames(vec![PcmFrame {
+        samples: vec![600, -600],
+        sample_rate_hz: 16_000,
+        channels: 1,
+    }]);
+    let recovery_controller = DictationController::new(
+        Arc::clone(&next_platform) as Arc<_>,
+        GeminiLiveClient::new(GeminiClientConfig {
+            endpoint_url: format!("ws://{addr}"),
+            ..GeminiClientConfig::default()
+        }),
+        Arc::clone(&store) as Arc<_>,
+        SessionTimersConfig::default(),
+    );
+    recovery_controller.handle_hotkey_pressed().await.unwrap();
+    recovery_controller.handle_hotkey_released().await.unwrap();
+    assert!(matches!(
+        recovery_controller.state().await,
+        SessionState::FallbackNotice { .. }
+    ));
+
+    next_platform.set_fail_paste(None);
+    next_platform.enqueue_audio_frames(vec![PcmFrame {
+        samples: vec![600, -600],
+        sample_rate_hz: 16_000,
+        channels: 1,
+    }]);
+    recovery_controller.handle_hotkey_pressed().await.unwrap();
+    let second_delivered = recovery_controller.handle_hotkey_released().await.unwrap();
+    assert_eq!(second_delivered.as_deref(), Some("Second ok."));
+    assert_eq!(recovery_controller.state().await, SessionState::Idle);
 }

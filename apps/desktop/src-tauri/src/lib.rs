@@ -3,6 +3,7 @@ mod clipboard_adapter;
 mod credential_adapter;
 mod hotkey_adapter;
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -19,9 +20,7 @@ use echoflow_core::gemini::{GeminiClientConfig, GeminiLiveClient};
 use echoflow_core::hotkey::validate_and_normalize_hotkey;
 use echoflow_core::platform::{ClipboardSnapshot, HotkeyEvent, PcmFrame, PlatformAdapter};
 use echoflow_core::store::{LocalStore, SqliteLocalStore};
-use hotkey_adapter::{
-    probe_platform_capabilities, start_global_hotkey_listener, HotkeyListenerHandle,
-};
+use hotkey_adapter::{start_global_hotkey_listener, HotkeyListenerHandle};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
@@ -64,17 +63,17 @@ impl PlatformAdapter for DesktopPlatformAdapter {
     }
 
     async fn read_clipboard(&self) -> Result<ClipboardSnapshot, DictationError> {
-        let caps = probe_platform_capabilities();
+        let caps = credential_adapter::probe_platform_capabilities().await?;
         self.clipboard.read_clipboard(&caps)
     }
 
     async fn write_clipboard(&self, text: &str) -> Result<(), DictationError> {
-        let caps = probe_platform_capabilities();
+        let caps = credential_adapter::probe_platform_capabilities().await?;
         self.clipboard.write_clipboard(&caps, text)
     }
 
     async fn trigger_paste(&self) -> Result<(), DictationError> {
-        let caps = probe_platform_capabilities();
+        let caps = credential_adapter::probe_platform_capabilities().await?;
         self.clipboard.trigger_paste(&caps)
     }
 
@@ -254,10 +253,7 @@ async fn get_preferences(state: State<'_, AppState>) -> Result<AppPreferences, S
 }
 
 #[tauri::command]
-async fn save_preferences(
-    state: State<'_, AppState>,
-    prefs: AppPreferences,
-) -> Result<(), String> {
+async fn save_preferences(state: State<'_, AppState>, prefs: AppPreferences) -> Result<(), String> {
     state
         .store
         .save_preferences(&prefs)
@@ -271,6 +267,7 @@ async fn save_general_settings(
     push_to_talk_hotkey: String,
     restore_clipboard: bool,
     clipboard_restore_delay_ms: u64,
+    history_retention_days: u32,
 ) -> Result<AppPreferences, String> {
     let normalized =
         validate_and_normalize_hotkey(&push_to_talk_hotkey).map_err(|e| e.to_string())?;
@@ -283,6 +280,7 @@ async fn save_general_settings(
     prefs.push_to_talk_hotkey = normalized.clone();
     prefs.restore_clipboard = restore_clipboard;
     prefs.clipboard_restore_delay_ms = clipboard_restore_delay_ms;
+    prefs.history_retention_days = history_retention_days;
 
     state
         .store
@@ -430,11 +428,69 @@ fn tray_status_label(status: TrayStatus) -> &'static str {
     }
 }
 
+fn resolve_sqlite_db_path() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    let base_dir = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|h| h.join("Library").join("Application Support"));
+
+    #[cfg(target_os = "windows")]
+    let base_dir = std::env::var_os("APPDATA")
+        .or_else(|| std::env::var_os("LOCALAPPDATA"))
+        .map(PathBuf::from);
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let base_dir = std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|h| h.join(".local").join("share"))
+        });
+
+    base_dir
+        .unwrap_or_else(std::env::temp_dir)
+        .join("echoflow")
+        .join("echoflow.sqlite")
+}
+
+fn open_desktop_local_store() -> SqliteLocalStore {
+    let db_path = resolve_sqlite_db_path();
+    let parent_result = match db_path.parent() {
+        Some(parent) => std::fs::create_dir_all(parent),
+        None => Ok(()),
+    };
+    match parent_result {
+        Ok(()) => match SqliteLocalStore::open(&db_path) {
+            Ok(store) => return store,
+            Err(err) => {
+                tracing::warn!(
+                    status = "DEGRADED",
+                    component = "local_store",
+                    path = %db_path.display(),
+                    cause = %err,
+                    "failed to open persistent SQLite store; falling back to in-memory store"
+                );
+            }
+        },
+        Err(err) => {
+            tracing::warn!(
+                status = "DEGRADED",
+                component = "local_store",
+                path = %db_path.display(),
+                cause = %err,
+                "failed to create persistent data directory; falling back to in-memory store"
+            );
+        }
+    }
+
+    SqliteLocalStore::open_in_memory().expect("failed to initialize fallback in-memory local store")
+}
+
 pub fn run() {
     let platform = Arc::new(DesktopPlatformAdapter::default());
-    let store: Arc<dyn LocalStore> = Arc::new(
-        SqliteLocalStore::open_in_memory().expect("failed to initialize local store"),
-    );
+    let store: Arc<dyn LocalStore> = Arc::new(open_desktop_local_store());
     let gemini = GeminiLiveClient::new(GeminiClientConfig::default());
     let credential_service = Arc::new(ProviderCredentialService::new(Arc::clone(&platform) as _));
     let controller = Arc::new(DictationController::new(
