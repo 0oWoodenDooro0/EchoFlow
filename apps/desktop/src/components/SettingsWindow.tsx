@@ -11,20 +11,16 @@ export function SettingsWindow() {
   const [activeTab, setActiveTab] = useState<SettingsTab>("onboarding");
 
   const tabs: { id: SettingsTab; label: string }[] = [
-    { id: "onboarding", label: "Provider Credential & Permissions" },
+    { id: "onboarding", label: "Credentials" },
     { id: "general", label: "General" },
-    { id: "vocabulary", label: "Custom Vocabulary" },
+    { id: "vocabulary", label: "Vocabulary" },
     { id: "history", label: "History" },
   ];
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <header className="border-b border-slate-800 px-6 py-4">
-        <h1 className="text-lg font-semibold">EchoFlow Settings & History</h1>
-        <p className="text-xs text-slate-400">
-          Local-first BYOK desktop voice dictation powered by
-          gemini-3.5-transcribe-live
-        </p>
+        <h1 className="text-lg font-semibold">EchoFlow</h1>
       </header>
 
       <nav className="flex gap-2 border-b border-slate-800 px-6 py-2">

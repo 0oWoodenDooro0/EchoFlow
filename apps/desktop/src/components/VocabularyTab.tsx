@@ -139,9 +139,7 @@ export function VocabularyTab() {
     try {
       const exported = await exportSettingsJson();
       setJsonText(exported);
-      setStatusMessage(
-        "Exported preferences and Custom Vocabulary (excluding Provider Credential and History Entry).",
-      );
+      setStatusMessage("Exported JSON.");
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to export settings JSON",
@@ -170,14 +168,7 @@ export function VocabularyTab() {
   return (
     <section className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-base font-medium text-white">
-            Custom Vocabulary
-          </h2>
-          <p className="text-xs text-slate-400">
-            Manage domain jargon and proper nouns for recognition biasing.
-          </p>
-        </div>
+        <h2 className="text-base font-medium text-white">Custom Vocabulary</h2>
         <span
           data-testid="vocabulary-counter"
           className={`rounded-full border px-3 py-1 text-xs font-medium ${
@@ -295,14 +286,7 @@ export function VocabularyTab() {
 
       <div className="space-y-2 border-t border-slate-800 pt-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h3 className="text-sm font-medium text-white">
-              Settings &amp; Vocabulary JSON Export / Import
-            </h3>
-            <p className="text-xs text-slate-400">
-              Excludes Provider Credential and History Entry records.
-            </p>
-          </div>
+          <h3 className="text-sm font-medium text-white">JSON Export / Import</h3>
           <div className="flex gap-2">
             <button
               type="button"
@@ -325,7 +309,7 @@ export function VocabularyTab() {
           onChange={(e) => setJsonText(e.target.value)}
           aria-label="Settings JSON"
           rows={4}
-          placeholder="Click Export JSON or paste an exported JSON payload here to import..."
+          placeholder="Exported JSON..."
           className="w-full rounded-md border border-slate-800 bg-slate-900 p-2 font-mono text-xs text-slate-200 placeholder-slate-500 focus:border-sky-500 focus:outline-none"
         />
       </div>

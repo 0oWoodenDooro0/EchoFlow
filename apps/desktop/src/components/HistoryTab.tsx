@@ -82,13 +82,7 @@ export function HistoryTab() {
   return (
     <section className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-base font-medium text-white">History</h2>
-          <p className="text-xs text-slate-400">
-            Text-only local records of completed Dictation Sessions (no audio
-            saved).
-          </p>
-        </div>
+        <h2 className="text-base font-medium text-white">History</h2>
         <button
           type="button"
           onClick={handleClearAll}

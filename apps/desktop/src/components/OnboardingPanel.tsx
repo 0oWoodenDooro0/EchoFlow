@@ -136,15 +136,9 @@ export function OnboardingPanel() {
     <div className="space-y-6">
       <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
         <div className="mb-3 flex items-center justify-between">
-          <div>
-            <h2 className="text-base font-medium text-white">
-              Provider Credential
-            </h2>
-            <p className="text-xs text-slate-400">
-              Stored exclusively in your OS native credential store (never
-              written to SQLite or JSON).
-            </p>
-          </div>
+          <h2 className="text-base font-medium text-white">
+            Provider Credential
+          </h2>
           <span
             className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${
               credentialStatus?.configured
@@ -308,7 +302,7 @@ export function OnboardingPanel() {
               Text Insertion:{" "}
               {capabilities.supports_text_insertion
                 ? "Supported"
-                : "Fallback Delivery (clipboard-only when Wayland paste helpers are unavailable)"}
+                : "Fallback Delivery"}
             </p>
           </div>
         </section>

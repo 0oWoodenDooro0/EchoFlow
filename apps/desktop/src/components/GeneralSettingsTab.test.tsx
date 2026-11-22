@@ -35,14 +35,17 @@ describe("GeneralSettingsTab at Tauri IPC boundary", () => {
       if (cmd === "get_platform_capabilities") return defaultCaps;
       if (cmd === "save_general_settings") {
         const payload = args as {
-          push_to_talk_hotkey: string;
-          restore_clipboard: boolean;
-          clipboard_restore_delay_ms: number;
-          history_retention_days: number;
+          pushToTalkHotkey: string;
+          restoreClipboard: boolean;
+          clipboardRestoreDelayMs: number;
+          historyRetentionDays: number;
         };
         return {
           ...defaultPrefs,
-          ...payload,
+          push_to_talk_hotkey: payload.pushToTalkHotkey,
+          restore_clipboard: payload.restoreClipboard,
+          clipboard_restore_delay_ms: payload.clipboardRestoreDelayMs,
+          history_retention_days: payload.historyRetentionDays,
         };
       }
       return null;
@@ -72,10 +75,10 @@ describe("GeneralSettingsTab at Tauri IPC boundary", () => {
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("save_general_settings", {
-        push_to_talk_hotkey: "Ctrl+Shift+Space",
-        restore_clipboard: true,
-        clipboard_restore_delay_ms: 150,
-        history_retention_days: 30,
+        pushToTalkHotkey: "Ctrl+Shift+Space",
+        restoreClipboard: true,
+        clipboardRestoreDelayMs: 150,
+        historyRetentionDays: 30,
       });
     });
 
@@ -130,14 +133,17 @@ describe("GeneralSettingsTab at Tauri IPC boundary", () => {
       }
       if (cmd === "save_general_settings") {
         const payload = args as {
-          push_to_talk_hotkey: string;
-          restore_clipboard: boolean;
-          clipboard_restore_delay_ms: number;
-          history_retention_days: number;
+          pushToTalkHotkey: string;
+          restoreClipboard: boolean;
+          clipboardRestoreDelayMs: number;
+          historyRetentionDays: number;
         };
         return {
           ...defaultPrefs,
-          ...payload,
+          push_to_talk_hotkey: payload.pushToTalkHotkey,
+          restore_clipboard: payload.restoreClipboard,
+          clipboard_restore_delay_ms: payload.clipboardRestoreDelayMs,
+          history_retention_days: payload.historyRetentionDays,
         };
       }
       return null;
@@ -161,10 +167,10 @@ describe("GeneralSettingsTab at Tauri IPC boundary", () => {
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("save_general_settings", {
-        push_to_talk_hotkey: "Alt+Space",
-        restore_clipboard: false,
-        clipboard_restore_delay_ms: 150,
-        history_retention_days: 30,
+        pushToTalkHotkey: "Alt+Space",
+        restoreClipboard: false,
+        clipboardRestoreDelayMs: 150,
+        historyRetentionDays: 30,
       });
     });
   });
@@ -201,10 +207,10 @@ describe("GeneralSettingsTab at Tauri IPC boundary", () => {
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("save_general_settings", {
-        push_to_talk_hotkey: "Alt+Space",
-        restore_clipboard: true,
-        clipboard_restore_delay_ms: 150,
-        history_retention_days: 90,
+        pushToTalkHotkey: "Alt+Space",
+        restoreClipboard: true,
+        clipboardRestoreDelayMs: 150,
+        historyRetentionDays: 90,
       });
     });
 

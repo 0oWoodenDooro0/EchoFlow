@@ -111,7 +111,12 @@ export async function saveGeneralSettings(params: {
   clipboard_restore_delay_ms: number;
   history_retention_days: number;
 }): Promise<AppPreferences> {
-  return invoke<AppPreferences>("save_general_settings", params);
+  return invoke<AppPreferences>("save_general_settings", {
+    pushToTalkHotkey: params.push_to_talk_hotkey,
+    restoreClipboard: params.restore_clipboard,
+    clipboardRestoreDelayMs: params.clipboard_restore_delay_ms,
+    historyRetentionDays: params.history_retention_days,
+  });
 }
 
 export async function getProviderCredentialStatus(): Promise<ProviderCredentialStatus> {

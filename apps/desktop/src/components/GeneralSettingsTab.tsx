@@ -250,23 +250,10 @@ export function GeneralSettingsTab() {
 
   return (
     <form onSubmit={handleSave} className="space-y-6">
-      <div>
-        <h2 className="mb-1 text-base font-medium text-white">
-          Push-to-Talk Hotkey & Clipboard Preservation
-        </h2>
-        <p className="text-xs text-slate-400">
-          Hold your Push-to-Talk Hotkey from any application to start a
-          Dictation Session. Press Escape while speaking to cancel without
-          inserting text.
-        </p>
-      </div>
-
       {capabilities?.display_server === "linux_wayland" &&
         !capabilities.supports_text_insertion && (
           <div className="rounded-md border border-amber-500/40 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
-            Linux Wayland session detected without{" "}
-            <code>ydotool</code>/<code>wtype</code>. Text Insertion will use
-            Fallback Delivery (leaving Final Transcript on your clipboard).
+            Wayland: using Fallback Delivery (clipboard).
           </div>
         )}
 
@@ -355,9 +342,6 @@ export function GeneralSettingsTab() {
             }}
             className="w-28 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-white focus:border-sky-500 focus:outline-none"
           />
-          <span className="text-xs text-slate-400">
-            Entries older than this are pruned automatically (1–3650 days).
-          </span>
         </div>
       </div>
 

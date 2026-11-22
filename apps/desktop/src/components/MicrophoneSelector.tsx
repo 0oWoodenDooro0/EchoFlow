@@ -74,11 +74,18 @@ export function MicrophoneSelector() {
           value={selectedId}
           disabled={loading}
           onChange={(e) => void handleChange(e.target.value)}
+          style={{ colorScheme: "dark" }}
           className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-emerald-500 focus:outline-none"
         >
-          <option value="">System Default Microphone</option>
+          <option value="" className="bg-slate-900 text-slate-100">
+            System Default Microphone
+          </option>
           {devices.map((device) => (
-            <option key={device.id} value={device.id}>
+            <option
+              key={device.id}
+              value={device.id}
+              className="bg-slate-900 text-slate-100"
+            >
               {device.is_default ? `${device.name} (Default)` : device.name}
             </option>
           ))}
