@@ -166,6 +166,7 @@ impl GeminiLiveClient {
         let header_value = HeaderValue::from_str(api_key)
             .map_err(|e| DictationError::InvalidInput(format!("invalid API key header: {e}")))?;
         request.headers_mut().insert("x-goog-api-key", header_value);
+        let _ = rustls::crypto::ring::default_provider().install_default();
         Ok(request)
     }
 
