@@ -109,7 +109,7 @@ export function OverlayPill() {
       >
         {sessionState.kind === "connecting" && (
           <>
-            <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-amber-400" />
+            <span className="h-2.5 w-2.5 rounded-full bg-amber-400" />
             <span className="font-medium text-amber-200">Connecting...</span>
           </>
         )}
@@ -142,14 +142,14 @@ export function OverlayPill() {
 
         {sessionState.kind === "finalizing" && (
           <>
-            <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-sky-400" />
+            <span className="h-2.5 w-2.5 rounded-full bg-sky-400" />
             <span className="font-medium text-sky-200">Finalizing...</span>
           </>
         )}
 
         {sessionState.kind === "delivering" && (
           <>
-            <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-indigo-400" />
+            <span className="h-2.5 w-2.5 rounded-full bg-indigo-400" />
             <span className="font-medium text-indigo-200">Delivering...</span>
           </>
         )}
