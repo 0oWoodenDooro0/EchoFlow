@@ -7,7 +7,7 @@ use echoflow_core::domain::{
 };
 use echoflow_core::gemini::{GeminiClientConfig, GeminiLiveClient};
 use echoflow_core::platform::PcmFrame;
-use echoflow_core::store::{InMemoryLocalStore, LocalStore};
+use echoflow_core::store::{LocalStore, SqliteLocalStore};
 use echoflow_core::testing::{ClipboardOp, FakePlatformAdapter};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -114,7 +114,9 @@ async fn full_dictation_session_lifecycle_streams_audio_emits_draft_and_delivers
         },
     ]);
 
-    let store = Arc::new(InMemoryLocalStore::new());
+    let store = Arc::new(SqliteLocalStore::open_in_memory().unwrap());
+    store.add_vocabulary_term("EchoFlow").await.unwrap();
+    store.add_vocabulary_term("UniFFI").await.unwrap();
     let gemini = GeminiLiveClient::new(GeminiClientConfig {
         endpoint_url: ws_url,
         ..GeminiClientConfig::default()
@@ -182,6 +184,10 @@ async fn full_dictation_session_lifecycle_streams_audio_emits_draft_and_delivers
     assert_eq!(rec.setup_messages.len(), 1);
     assert_eq!(rec.setup_messages[0]["model"], "gemini-3.5-transcribe-live");
     assert_eq!(rec.setup_messages[0]["mode"], "SMART");
+    assert_eq!(
+        rec.setup_messages[0]["vocabulary"],
+        json!(["EchoFlow", "UniFFI"])
+    );
     assert!(rec.pcm_bytes_received >= 16);
     assert!(rec.received_end_of_audio);
 
@@ -221,7 +227,9 @@ async fn duplicate_hotkey_press_while_active_is_rejected_without_corrupting_sess
         channels: 1,
     }]);
 
-    let store = Arc::new(InMemoryLocalStore::new());
+    let store = Arc::new(SqliteLocalStore::open_in_memory().unwrap());
+    store.add_vocabulary_term("EchoFlow").await.unwrap();
+    store.add_vocabulary_term("UniFFI").await.unwrap();
     let gemini = GeminiLiveClient::new(GeminiClientConfig {
         endpoint_url: ws_url,
         ..GeminiClientConfig::default()
@@ -258,7 +266,9 @@ async fn missing_provider_credential_transitions_to_error_and_allows_recovery() 
 
     let platform = Arc::new(FakePlatformAdapter::new());
     // No Provider Credential configured initially.
-    let store = Arc::new(InMemoryLocalStore::new());
+    let store = Arc::new(SqliteLocalStore::open_in_memory().unwrap());
+    store.add_vocabulary_term("EchoFlow").await.unwrap();
+    store.add_vocabulary_term("UniFFI").await.unwrap();
     let gemini = GeminiLiveClient::new(GeminiClientConfig {
         endpoint_url: ws_url,
         ..GeminiClientConfig::default()
@@ -322,7 +332,9 @@ async fn escape_cancel_aborts_session_without_delivery_or_history() {
         channels: 1,
     }]);
 
-    let store = Arc::new(InMemoryLocalStore::new());
+    let store = Arc::new(SqliteLocalStore::open_in_memory().unwrap());
+    store.add_vocabulary_term("EchoFlow").await.unwrap();
+    store.add_vocabulary_term("UniFFI").await.unwrap();
     let gemini = GeminiLiveClient::new(GeminiClientConfig {
         endpoint_url: ws_url,
         ..GeminiClientConfig::default()
@@ -366,7 +378,9 @@ async fn paste_failure_degrades_to_fallback_delivery_without_clipboard_restore()
         channels: 1,
     }]);
 
-    let store = Arc::new(InMemoryLocalStore::new());
+    let store = Arc::new(SqliteLocalStore::open_in_memory().unwrap());
+    store.add_vocabulary_term("EchoFlow").await.unwrap();
+    store.add_vocabulary_term("UniFFI").await.unwrap();
     let gemini = GeminiLiveClient::new(GeminiClientConfig {
         endpoint_url: ws_url,
         ..GeminiClientConfig::default()

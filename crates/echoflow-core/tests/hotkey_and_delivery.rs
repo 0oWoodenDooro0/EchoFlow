@@ -9,7 +9,7 @@ use echoflow_core::domain::{
 };
 use echoflow_core::gemini::{GeminiClientConfig, GeminiLiveClient};
 use echoflow_core::hotkey::validate_and_normalize_hotkey;
-use echoflow_core::store::{InMemoryLocalStore, LocalStore};
+use echoflow_core::store::{LocalStore, SqliteLocalStore};
 use echoflow_core::testing::{ClipboardOp, FakePlatformAdapter};
 use tokio::net::TcpListener;
 
@@ -178,7 +178,7 @@ async fn escape_cancel_during_connecting_aborts_cleanly_without_delivery_or_hist
     platform.set_credential_sync(Some("test-key".to_string()));
     platform.set_clipboard_sync(Some("keep-me".to_string()));
 
-    let store = Arc::new(InMemoryLocalStore::new());
+    let store = Arc::new(SqliteLocalStore::open_in_memory().unwrap());
     let gemini = GeminiLiveClient::new(GeminiClientConfig {
         endpoint_url: format!("ws://{addr}"),
         ..GeminiClientConfig::default()

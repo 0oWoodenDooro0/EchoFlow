@@ -103,7 +103,7 @@ use echoflow_core::domain::{
     AudioDeviceInfo, ControllerEvent, DictationError, SessionState, TrayStatus,
 };
 use echoflow_core::gemini::{GeminiClientConfig, GeminiLiveClient};
-use echoflow_core::store::{InMemoryLocalStore, LocalStore};
+use echoflow_core::store::{LocalStore, SqliteLocalStore};
 use echoflow_core::testing::FakePlatformAdapter;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -167,7 +167,7 @@ async fn missing_selected_microphone_falls_back_to_os_default() {
         channels: 2,
     }]);
 
-    let store = Arc::new(InMemoryLocalStore::new());
+    let store = Arc::new(SqliteLocalStore::open_in_memory().unwrap());
     let mut prefs = store.get_preferences().await.unwrap();
     prefs.microphone_id = Some("disconnected-usb-mic".to_string());
     store.save_preferences(&prefs).await.unwrap();
@@ -212,7 +212,7 @@ async fn no_available_microphone_transitions_to_error_state_and_tray_error() {
     platform.set_credential_sync(Some("test-key".to_string()));
     platform.set_audio_devices(vec![]);
 
-    let store = Arc::new(InMemoryLocalStore::new());
+    let store = Arc::new(SqliteLocalStore::open_in_memory().unwrap());
     let gemini = GeminiLiveClient::new(GeminiClientConfig {
         endpoint_url: ws_url,
         ..GeminiClientConfig::default()
@@ -260,7 +260,7 @@ async fn mid_session_microphone_disconnect_transitions_gracefully_to_error_state
         channels: 1,
     }]);
 
-    let store = Arc::new(InMemoryLocalStore::new());
+    let store = Arc::new(SqliteLocalStore::open_in_memory().unwrap());
     let gemini = GeminiLiveClient::new(GeminiClientConfig {
         endpoint_url: ws_url,
         ..GeminiClientConfig::default()
@@ -321,7 +321,7 @@ async fn controller_persists_selected_microphone_and_streams_resampled_pcm() {
         channels: 2,
     }]);
 
-    let store = Arc::new(InMemoryLocalStore::new());
+    let store = Arc::new(SqliteLocalStore::open_in_memory().unwrap());
     let gemini = GeminiLiveClient::new(GeminiClientConfig {
         endpoint_url: ws_url,
         ..GeminiClientConfig::default()

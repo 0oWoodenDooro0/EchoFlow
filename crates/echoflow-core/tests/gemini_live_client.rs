@@ -7,7 +7,7 @@ use echoflow_core::domain::{
 };
 use echoflow_core::gemini::{GeminiClientConfig, GeminiLiveClient};
 use echoflow_core::platform::PcmFrame;
-use echoflow_core::store::{InMemoryLocalStore, LocalStore};
+use echoflow_core::store::{LocalStore, SqliteLocalStore};
 use echoflow_core::testing::FakePlatformAdapter;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -206,7 +206,7 @@ async fn start_recording_ws_server(
 }
 
 struct TestVocabularyStore {
-    inner: InMemoryLocalStore,
+    inner: SqliteLocalStore,
     vocab: Vec<String>,
 }
 
@@ -247,7 +247,7 @@ async fn setup_configures_smart_mode_and_forwards_custom_vocabulary_with_1000_ca
     }]);
 
     let store = Arc::new(TestVocabularyStore {
-        inner: InMemoryLocalStore::new(),
+        inner: SqliteLocalStore::open_in_memory().unwrap(),
         vocab: vec![
             "EchoFlow".to_string(),
             "UniFFI".to_string(),
@@ -325,7 +325,7 @@ async fn streams_raw_16bit_16khz_mono_pcm_chunks_continuously_while_listening() 
         },
     ]);
 
-    let store = Arc::new(InMemoryLocalStore::new());
+    let store = Arc::new(SqliteLocalStore::open_in_memory().unwrap());
     let gemini = GeminiLiveClient::new(GeminiClientConfig {
         endpoint_url: ws_url,
         ..GeminiClientConfig::default()
@@ -381,7 +381,7 @@ async fn draft_transcript_self_corrections_replace_earlier_words_without_duplica
         channels: 1,
     }]);
 
-    let store = Arc::new(InMemoryLocalStore::new());
+    let store = Arc::new(SqliteLocalStore::open_in_memory().unwrap());
     let gemini = GeminiLiveClient::new(GeminiClientConfig {
         endpoint_url: ws_url,
         ..GeminiClientConfig::default()
@@ -436,7 +436,7 @@ async fn flush_timeout_resolves_cleanly_with_latest_draft_rather_than_hanging() 
         channels: 1,
     }]);
 
-    let store = Arc::new(InMemoryLocalStore::new());
+    let store = Arc::new(SqliteLocalStore::open_in_memory().unwrap());
     let gemini = GeminiLiveClient::new(GeminiClientConfig {
         endpoint_url: ws_url,
         flush_timeout: Duration::from_millis(80),
@@ -492,7 +492,7 @@ async fn empty_or_whitespace_final_transcript_completes_without_insertion_or_his
             channels: 1,
         }]);
 
-        let store = Arc::new(InMemoryLocalStore::new());
+        let store = Arc::new(SqliteLocalStore::open_in_memory().unwrap());
         let gemini = GeminiLiveClient::new(GeminiClientConfig {
             endpoint_url: ws_url,
             ..GeminiClientConfig::default()
