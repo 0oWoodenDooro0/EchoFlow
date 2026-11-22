@@ -94,6 +94,28 @@ impl DictationController {
         self.inner.lock().await.state.clone()
     }
 
+    /// Recompute and emit the current `TrayStatus` from controller state and credential presence.
+    pub async fn refresh_tray_status(&self) -> TrayStatus {
+        let state = self.inner.lock().await.state.clone();
+        let tray = match state {
+            SessionState::Connecting
+            | SessionState::Listening
+            | SessionState::Finalizing
+            | SessionState::Delivering => TrayStatus::Listening,
+            SessionState::Idle
+            | SessionState::FallbackNotice { .. }
+            | SessionState::Error { .. } => match self.platform.get_provider_credential().await {
+                Ok(Some(key)) if !key.trim().is_empty() => match state {
+                    SessionState::Error { .. } => TrayStatus::Error,
+                    _ => TrayStatus::Idle,
+                },
+                _ => TrayStatus::MissingCredential,
+            },
+        };
+        self.emit(ControllerEvent::TrayStatusChanged { status: tray });
+        tray
+    }
+
     fn emit(&self, event: ControllerEvent) {
         let _ = self.events_tx.send(event);
     }

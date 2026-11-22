@@ -25,6 +25,7 @@ pub struct FakePlatformAdapter {
     devices: Mutex<Vec<AudioDeviceInfo>>,
     capabilities: Mutex<PlatformCapabilities>,
     fail_paste_with: Mutex<Option<String>>,
+    fail_credential_store_with: Mutex<Option<String>>,
 }
 
 impl FakePlatformAdapter {
@@ -60,6 +61,10 @@ impl FakePlatformAdapter {
 
     pub fn set_fail_paste(&self, reason: Option<String>) {
         *self.fail_paste_with.lock().unwrap() = reason;
+    }
+
+    pub fn set_fail_credential_store(&self, reason: Option<String>) {
+        *self.fail_credential_store_with.lock().unwrap() = reason;
     }
 
     pub fn set_capabilities(&self, capabilities: PlatformCapabilities) {
@@ -128,15 +133,24 @@ impl PlatformAdapter for FakePlatformAdapter {
     }
 
     async fn get_provider_credential(&self) -> Result<Option<String>, DictationError> {
+        if let Some(reason) = self.fail_credential_store_with.lock().unwrap().clone() {
+            return Err(DictationError::CredentialStoreFailed(reason));
+        }
         Ok(self.credential.lock().unwrap().clone())
     }
 
     async fn set_provider_credential(&self, api_key: &str) -> Result<(), DictationError> {
+        if let Some(reason) = self.fail_credential_store_with.lock().unwrap().clone() {
+            return Err(DictationError::CredentialStoreFailed(reason));
+        }
         *self.credential.lock().unwrap() = Some(api_key.to_string());
         Ok(())
     }
 
     async fn delete_provider_credential(&self) -> Result<(), DictationError> {
+        if let Some(reason) = self.fail_credential_store_with.lock().unwrap().clone() {
+            return Err(DictationError::CredentialStoreFailed(reason));
+        }
         *self.credential.lock().unwrap() = None;
         Ok(())
     }
