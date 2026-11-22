@@ -155,4 +155,80 @@ describe("OverlayPill at Tauri IPC boundary", () => {
     });
     expect(waveform).toHaveAttribute("data-rms", "0.50");
   });
+
+  it("displays the 9:30 countdown warning badge without interrupting Listening or Draft Transcript", async () => {
+    render(<OverlayPill />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    emitControllerEvent({
+      type: "state_changed",
+      state: { kind: "listening" },
+    });
+    emitControllerEvent({
+      type: "draft_transcript_updated",
+      draft_transcript: "Still dictating near limit",
+    });
+    emitControllerEvent({
+      type: "session_warning",
+      seconds_remaining: 30,
+    });
+
+    const pill = screen.getByRole("status");
+    expect(pill).toHaveTextContent(/listening/i);
+    expect(pill).toHaveTextContent("30s left");
+    expect(pill).toHaveTextContent("Still dictating near limit");
+    expect(screen.getByLabelText("Audio waveform")).toBeInTheDocument();
+
+    // Subsequent Draft Transcript updates continue displaying alongside the warning badge.
+    emitControllerEvent({
+      type: "draft_transcript_updated",
+      draft_transcript: "Still dictating near limit and continuing",
+    });
+    expect(pill).toHaveTextContent("30s left");
+    expect(pill).toHaveTextContent("Still dictating near limit and continuing");
+
+    // Returning to idle and starting a new session clears the prior warning badge.
+    emitControllerEvent({
+      type: "state_changed",
+      state: { kind: "idle" },
+    });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+
+    emitControllerEvent({
+      type: "state_changed",
+      state: { kind: "listening" },
+    });
+    expect(screen.getByRole("status")).not.toHaveTextContent("30s left");
+  });
+
+  it("renders error banner on mid-stream disconnect ErrorOccurred and clears countdown badge", async () => {
+    render(<OverlayPill />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    emitControllerEvent({
+      type: "state_changed",
+      state: { kind: "listening" },
+    });
+    emitControllerEvent({
+      type: "session_warning",
+      seconds_remaining: 30,
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("30s left");
+
+    emitControllerEvent({
+      type: "error_occurred",
+      message:
+        "Connection interrupted (socket reset). Partial transcript saved to clipboard and history.",
+    });
+
+    const pill = screen.getByRole("status");
+    expect(pill).toHaveTextContent(
+      "Connection interrupted (socket reset). Partial transcript saved to clipboard and history.",
+    );
+    expect(pill).not.toHaveTextContent("30s left");
+  });
 });

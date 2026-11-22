@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use echoflow_core::controller::{DictationController, SessionTimersConfig};
 use echoflow_core::domain::{
-    AppPreferences, ControllerEvent, DictationError, HistoryEntry, SessionState,
+    AppPreferences, ControllerEvent, DictationError, HistoryEntry, SessionState, VocabularyEntry,
 };
 use echoflow_core::gemini::{GeminiClientConfig, GeminiLiveClient};
 use echoflow_core::platform::PcmFrame;
@@ -220,8 +220,50 @@ impl LocalStore for TestVocabularyStore {
         self.inner.list_history_entries().await
     }
 
+    async fn search_history_entries(
+        &self,
+        query: &str,
+    ) -> Result<Vec<HistoryEntry>, DictationError> {
+        self.inner.search_history_entries(query).await
+    }
+
+    async fn delete_history_entry(&self, id: &str) -> Result<bool, DictationError> {
+        self.inner.delete_history_entry(id).await
+    }
+
+    async fn clear_history(&self) -> Result<usize, DictationError> {
+        self.inner.clear_history().await
+    }
+
     async fn list_vocabulary_terms(&self) -> Result<Vec<String>, DictationError> {
         Ok(self.vocab.clone())
+    }
+
+    async fn list_vocabulary_entries(&self) -> Result<Vec<VocabularyEntry>, DictationError> {
+        self.inner.list_vocabulary_entries().await
+    }
+
+    async fn search_vocabulary_entries(
+        &self,
+        query: &str,
+    ) -> Result<Vec<VocabularyEntry>, DictationError> {
+        self.inner.search_vocabulary_entries(query).await
+    }
+
+    async fn add_vocabulary_term(&self, term: &str) -> Result<VocabularyEntry, DictationError> {
+        self.inner.add_vocabulary_term(term).await
+    }
+
+    async fn update_vocabulary_term(
+        &self,
+        id: &str,
+        new_term: &str,
+    ) -> Result<VocabularyEntry, DictationError> {
+        self.inner.update_vocabulary_term(id, new_term).await
+    }
+
+    async fn delete_vocabulary_term(&self, id: &str) -> Result<bool, DictationError> {
+        self.inner.delete_vocabulary_term(id).await
     }
 
     async fn get_preferences(&self) -> Result<AppPreferences, DictationError> {
@@ -230,6 +272,14 @@ impl LocalStore for TestVocabularyStore {
 
     async fn save_preferences(&self, prefs: &AppPreferences) -> Result<(), DictationError> {
         self.inner.save_preferences(prefs).await
+    }
+
+    async fn export_settings_json(&self) -> Result<String, DictationError> {
+        self.inner.export_settings_json().await
+    }
+
+    async fn import_settings_json(&self, raw_json: &str) -> Result<(), DictationError> {
+        self.inner.import_settings_json(raw_json).await
     }
 }
 

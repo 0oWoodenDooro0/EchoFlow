@@ -33,7 +33,11 @@ export function OverlayPill() {
       switch (event.type) {
         case "state_changed":
           setSessionState(event.state);
-          if (event.state.kind === "idle" || event.state.kind === "connecting") {
+          if (
+            event.state.kind === "idle" ||
+            event.state.kind === "connecting" ||
+            event.state.kind === "error"
+          ) {
             setDraftTranscript("");
             setAudioLevel(0);
             setSecondsRemaining(null);
@@ -53,6 +57,7 @@ export function OverlayPill() {
           setSecondsRemaining(event.seconds_remaining);
           break;
         case "error_occurred":
+          setSecondsRemaining(null);
           setSessionState({ kind: "error", message: event.message });
           break;
         case "fallback_delivery_noticed":

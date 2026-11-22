@@ -338,6 +338,15 @@ impl GeminiLiveClient {
                             }
                         }
                     }
+                    Ok(Message::Close(Some(frame))) if frame.code != CloseCode::Normal => {
+                        let _ = inbound_tx
+                            .send(Err(DictationError::TranscriptionTransportFailed(format!(
+                                "WebSocket closed ({:?}): {}",
+                                frame.code, frame.reason
+                            ))))
+                            .await;
+                        break;
+                    }
                     Ok(Message::Close(_)) => break,
                     Ok(_) => {}
                     Err(err) => {

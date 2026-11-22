@@ -260,10 +260,6 @@ export async function deleteVocabularyTerm(id: string): Promise<boolean> {
   return invoke<boolean>("delete_vocabulary_term", { id });
 }
 
-export async function getPreferences(): Promise<AppPreferences> {
-  return invoke<AppPreferences>("get_preferences");
-}
-
 export async function savePreferences(prefs: AppPreferences): Promise<void> {
   return invoke<void>("save_preferences", { prefs });
 }

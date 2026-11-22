@@ -51,6 +51,254 @@ struct ActiveSession {
 struct ControllerInner {
     state: SessionState,
     active_session: Option<ActiveSession>,
+    ignore_next_release: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalizeTrigger {
+    HotkeyRelease,
+    HardCapTimeout,
+}
+
+#[derive(Clone)]
+struct SessionRuntime {
+    platform: Arc<dyn PlatformAdapter>,
+    store: Arc<dyn LocalStore>,
+    delivery: Arc<DeliveryService>,
+    events_tx: broadcast::Sender<ControllerEvent>,
+    inner: Arc<Mutex<ControllerInner>>,
+    flush_timeout: Duration,
+}
+
+impl SessionRuntime {
+    fn emit(&self, event: ControllerEvent) {
+        let _ = self.events_tx.send(event);
+    }
+
+    async fn set_state(&self, new_state: SessionState) {
+        {
+            let mut guard = self.inner.lock().await;
+            guard.state = new_state.clone();
+        }
+        let tray = match &new_state {
+            SessionState::Idle | SessionState::FallbackNotice { .. } => TrayStatus::Idle,
+            SessionState::Connecting
+            | SessionState::Listening
+            | SessionState::Finalizing
+            | SessionState::Delivering => TrayStatus::Listening,
+            SessionState::Error { .. } => TrayStatus::Error,
+        };
+        self.emit(ControllerEvent::StateChanged { state: new_state });
+        self.emit(ControllerEvent::TrayStatusChanged { status: tray });
+    }
+
+    async fn transition_to_error(&self, message: String, tray_status: TrayStatus) {
+        {
+            let mut guard = self.inner.lock().await;
+            guard.state = SessionState::Error {
+                message: message.clone(),
+            };
+        }
+        self.emit(ControllerEvent::StateChanged {
+            state: SessionState::Error {
+                message: message.clone(),
+            },
+        });
+        self.emit(ControllerEvent::ErrorOccurred { message });
+        self.emit(ControllerEvent::TrayStatusChanged {
+            status: tray_status,
+        });
+    }
+
+    async fn salvage_mid_stream_failure(&self, started_at: Instant, draft: &str, cause: String) {
+        let trimmed = draft.trim();
+        if !trimmed.is_empty() {
+            tracing::warn!(
+                status = "DEGRADED",
+                component = "controller",
+                cause = %cause,
+                salvaged_chars = trimmed.len(),
+                "mid-stream disconnect; salvaging partial Draft Transcript to clipboard and History Entry"
+            );
+
+            if let Err(clip_err) = self.platform.write_clipboard(trimmed).await {
+                tracing::warn!(
+                    status = "DEGRADED",
+                    component = "controller",
+                    cause = %clip_err,
+                    "failed to write salvaged partial Draft Transcript to clipboard"
+                );
+            }
+
+            let entry = HistoryEntry {
+                id: Uuid::new_v4().to_string(),
+                final_transcript: trimmed.to_string(),
+                created_at_utc: Utc::now().to_rfc3339(),
+                duration_ms: started_at.elapsed().as_millis() as u64,
+                was_partial: true,
+                delivery_mode: DeliveryMode::FallbackDelivery,
+            };
+            if let Err(store_err) = self.store.save_history_entry(&entry).await {
+                tracing::warn!(
+                    status = "DEGRADED",
+                    component = "controller",
+                    cause = %store_err,
+                    "failed to persist salvaged partial History Entry"
+                );
+            }
+
+            let message = format!(
+                "Connection interrupted ({cause}). Partial transcript saved to clipboard and history."
+            );
+            self.transition_to_error(message, TrayStatus::Error).await;
+        } else {
+            tracing::warn!(
+                status = "DEGRADED",
+                component = "controller",
+                cause = %cause,
+                salvaged_chars = 0usize,
+                "mid-stream disconnect before any non-empty Draft Transcript was received"
+            );
+            let message = format!("Connection interrupted: {cause}");
+            self.transition_to_error(message, TrayStatus::Error).await;
+        }
+    }
+
+    async fn handle_mid_stream_disconnect(&self, cause: String) -> bool {
+        let active = {
+            let mut guard = self.inner.lock().await;
+            if matches!(
+                guard.state,
+                SessionState::Connecting | SessionState::Listening
+            ) {
+                guard.ignore_next_release = true;
+                guard.active_session.take()
+            } else {
+                None
+            }
+        };
+
+        let Some(session) = active else {
+            return false;
+        };
+
+        session.audio_task.abort();
+        session.timer_task.abort();
+        session.gemini_tx.close().await;
+
+        let latest = session.latest_draft.lock().await.clone();
+        self.salvage_mid_stream_failure(session.started_at, &latest, cause)
+            .await;
+        true
+    }
+
+    async fn finalize_active_session(
+        &self,
+        trigger: FinalizeTrigger,
+    ) -> Result<Option<String>, DictationError> {
+        let mut active = {
+            let mut guard = self.inner.lock().await;
+            match guard.active_session.take() {
+                Some(session) => {
+                    guard.state = SessionState::Finalizing;
+                    if trigger == FinalizeTrigger::HardCapTimeout {
+                        guard.ignore_next_release = true;
+                    }
+                    session
+                }
+                None => {
+                    if trigger == FinalizeTrigger::HotkeyRelease && guard.ignore_next_release {
+                        guard.ignore_next_release = false;
+                        return Ok(None);
+                    }
+                    return Err(DictationError::NoActiveSession);
+                }
+            }
+        };
+
+        self.emit(ControllerEvent::StateChanged {
+            state: SessionState::Finalizing,
+        });
+
+        // Stop capturing audio and signal end-of-audio to Gemini.
+        active.audio_task.abort();
+        if trigger != FinalizeTrigger::HardCapTimeout {
+            active.timer_task.abort();
+        }
+        let _ = active.gemini_tx.send_end_of_audio().await;
+
+        let final_transcript = match active.final_rx.take() {
+            Some(rx) => match tokio::time::timeout(self.flush_timeout, rx).await {
+                Ok(Ok(Ok(text))) => text,
+                Ok(Ok(Err(err))) => {
+                    active.server_task.abort();
+                    active.gemini_tx.close().await;
+                    let latest = active.latest_draft.lock().await.clone();
+                    self.salvage_mid_stream_failure(active.started_at, &latest, err.to_string())
+                        .await;
+                    return Err(err);
+                }
+                Ok(Err(_)) | Err(_) => {
+                    tracing::warn!(
+                        status = "DEGRADED",
+                        component = "controller",
+                        "finalization flush timed out; using latest Draft Transcript"
+                    );
+                    active.latest_draft.lock().await.clone()
+                }
+            },
+            None => active.latest_draft.lock().await.clone(),
+        };
+
+        active.server_task.abort();
+        active.gemini_tx.close().await;
+
+        let trimmed = final_transcript.trim();
+        if trimmed.is_empty() {
+            self.set_state(SessionState::Idle).await;
+            return Ok(None);
+        }
+
+        self.set_state(SessionState::Delivering).await;
+
+        let prefs = self.store.get_preferences().await.unwrap_or_default();
+        let outcome = self.delivery.deliver(trimmed, &prefs).await?;
+
+        let duration_ms = active.started_at.elapsed().as_millis() as u64;
+        let history_entry = HistoryEntry {
+            id: Uuid::new_v4().to_string(),
+            final_transcript: trimmed.to_string(),
+            created_at_utc: Utc::now().to_rfc3339(),
+            duration_ms,
+            was_partial: false,
+            delivery_mode: outcome.mode,
+        };
+        self.store.save_history_entry(&history_entry).await?;
+
+        self.emit(ControllerEvent::FinalTranscriptReady {
+            final_transcript: trimmed.to_string(),
+            delivery_mode: outcome.mode,
+        });
+
+        if outcome.mode == DeliveryMode::FallbackDelivery {
+            let reason = outcome
+                .fallback_reason
+                .unwrap_or_else(|| "Text Insertion unavailable".to_string());
+            self.emit(ControllerEvent::StateChanged {
+                state: SessionState::FallbackNotice {
+                    final_transcript: trimmed.to_string(),
+                    reason: reason.clone(),
+                },
+            });
+            self.emit(ControllerEvent::FallbackDeliveryNoticed {
+                final_transcript: trimmed.to_string(),
+                reason,
+            });
+        }
+
+        self.set_state(SessionState::Idle).await;
+        Ok(Some(trimmed.to_string()))
+    }
 }
 
 /// Top-level orchestrator owning the Dictation Session state machine.
@@ -58,7 +306,7 @@ pub struct DictationController {
     platform: Arc<dyn PlatformAdapter>,
     gemini: GeminiLiveClient,
     store: Arc<dyn LocalStore>,
-    delivery: DeliveryService,
+    runtime: SessionRuntime,
     timers: SessionTimersConfig,
     events_tx: broadcast::Sender<ControllerEvent>,
     inner: Arc<Mutex<ControllerInner>>,
@@ -71,19 +319,29 @@ impl DictationController {
         store: Arc<dyn LocalStore>,
         timers: SessionTimersConfig,
     ) -> Self {
-        let delivery = DeliveryService::new(Arc::clone(&platform));
+        let delivery = Arc::new(DeliveryService::new(Arc::clone(&platform)));
         let (events_tx, _) = broadcast::channel(128);
+        let inner = Arc::new(Mutex::new(ControllerInner {
+            state: SessionState::Idle,
+            active_session: None,
+            ignore_next_release: false,
+        }));
+        let runtime = SessionRuntime {
+            platform: Arc::clone(&platform),
+            store: Arc::clone(&store),
+            delivery,
+            events_tx: events_tx.clone(),
+            inner: Arc::clone(&inner),
+            flush_timeout: gemini.config().flush_timeout,
+        };
         Self {
             platform,
             gemini,
             store,
-            delivery,
+            runtime,
             timers,
             events_tx,
-            inner: Arc::new(Mutex::new(ControllerInner {
-                state: SessionState::Idle,
-                active_session: None,
-            })),
+            inner,
         }
     }
 
@@ -140,24 +398,11 @@ impl DictationController {
     }
 
     fn emit(&self, event: ControllerEvent) {
-        let _ = self.events_tx.send(event);
+        self.runtime.emit(event);
     }
 
     async fn set_state(&self, new_state: SessionState) {
-        {
-            let mut guard = self.inner.lock().await;
-            guard.state = new_state.clone();
-        }
-        let tray = match &new_state {
-            SessionState::Idle | SessionState::FallbackNotice { .. } => TrayStatus::Idle,
-            SessionState::Connecting
-            | SessionState::Listening
-            | SessionState::Finalizing
-            | SessionState::Delivering => TrayStatus::Listening,
-            SessionState::Error { .. } => TrayStatus::Error,
-        };
-        self.emit(ControllerEvent::StateChanged { state: new_state });
-        self.emit(ControllerEvent::TrayStatusChanged { status: tray });
+        self.runtime.set_state(new_state).await;
     }
 
     async fn is_connecting(&self) -> bool {
@@ -184,6 +429,7 @@ impl DictationController {
                 | SessionState::Error { .. }
                 | SessionState::FallbackNotice { .. } => {
                     guard.state = SessionState::Connecting;
+                    guard.ignore_next_release = false;
                 }
                 SessionState::Connecting
                 | SessionState::Listening
@@ -280,135 +526,167 @@ impl DictationController {
         let audio_events_tx = self.events_tx.clone();
         let audio_inner = Arc::clone(&self.inner);
 
-        let audio_task = tokio::spawn(async move {
-            let mut resampler = AudioResampler::new(DEFAULT_CHUNK_SAMPLES);
-            let mut transport_failed = false;
-
-            while let Some(frame) = audio_rx.recv().await {
-                for chunk in resampler.push_frame_immediate(&frame) {
-                    let rms = compute_normalized_rms(&chunk);
-                    let _ = audio_events_tx.send(ControllerEvent::AudioLevelUpdated { rms });
-                    let pcm_bytes = pcm_i16_to_le_bytes(&chunk);
-                    if audio_gemini_tx.send_audio_chunk(pcm_bytes).await.is_err() {
-                        transport_failed = true;
-                        break;
-                    }
-                }
-                if transport_failed {
-                    break;
-                }
-            }
-
-            if !transport_failed {
-                // `audio_rx` closed while the session was still active -> microphone disconnected.
-                let disconnected_session = {
-                    let mut guard = audio_inner.lock().await;
-                    if matches!(
-                        guard.state,
-                        SessionState::Connecting | SessionState::Listening
-                    ) {
-                        let message =
-                            "microphone disconnected during Dictation Session".to_string();
-                        guard.state = SessionState::Error {
-                            message: message.clone(),
-                        };
-                        Some((guard.active_session.take(), message))
-                    } else {
-                        None
-                    }
-                };
-
-                if let Some((maybe_session, message)) = disconnected_session {
-                    tracing::warn!(
-                        status = "DEGRADED",
-                        component = "audio",
-                        cause = %message,
-                        "microphone stream ended unexpectedly during active Dictation Session"
-                    );
-                    if let Some(active) = maybe_session {
-                        active.server_task.abort();
-                        active.timer_task.abort();
-                        active.gemini_tx.close().await;
-                    }
-                    let _ = audio_events_tx.send(ControllerEvent::StateChanged {
-                        state: SessionState::Error {
-                            message: message.clone(),
-                        },
-                    });
-                    let _ = audio_events_tx.send(ControllerEvent::ErrorOccurred { message });
-                    let _ = audio_events_tx.send(ControllerEvent::TrayStatusChanged {
-                        status: TrayStatus::Error,
-                    });
-                }
-            }
-        });
-
         let latest_draft = Arc::new(Mutex::new(String::new()));
         let server_draft = Arc::clone(&latest_draft);
         let server_events_tx = self.events_tx.clone();
+        let server_runtime = self.runtime.clone();
         let (final_tx, final_rx) = oneshot::channel();
 
-        let server_task = tokio::spawn(async move {
-            let mut final_tx = Some(final_tx);
-            while let Some(item) = gemini_rx.recv().await {
-                match item {
-                    Ok(GeminiServerEvent::SetupComplete) => {}
-                    Ok(GeminiServerEvent::DraftTranscript { text }) => {
-                        *server_draft.lock().await = text.clone();
-                        let _ = server_events_tx.send(ControllerEvent::DraftTranscriptUpdated {
-                            draft_transcript: text,
-                        });
-                    }
-                    Ok(GeminiServerEvent::FinalTranscript { text }) => {
-                        if let Some(tx) = final_tx.take() {
-                            let _ = tx.send(Ok(text));
-                        }
-                        break;
-                    }
-                    Ok(GeminiServerEvent::Error { message }) => {
-                        if let Some(tx) = final_tx.take() {
-                            let _ =
-                                tx.send(Err(DictationError::TranscriptionTransportFailed(message)));
-                        }
-                        break;
-                    }
-                    Err(err) => {
-                        if let Some(tx) = final_tx.take() {
-                            let _ = tx.send(Err(err));
-                        }
-                        break;
-                    }
-                }
-            }
-            if let Some(tx) = final_tx.take() {
-                let fallback = server_draft.lock().await.clone();
-                let _ = tx.send(Ok(fallback));
-            }
-        });
-
         let timers = self.timers;
-        let timer_events_tx = self.events_tx.clone();
-        let timer_task = tokio::spawn(async move {
-            if timers.warning_after < timers.hard_cap_after {
-                tokio::time::sleep(timers.warning_after).await;
-                let remaining = timers
-                    .hard_cap_after
-                    .saturating_sub(timers.warning_after)
-                    .as_secs();
-                let _ = timer_events_tx.send(ControllerEvent::SessionWarning {
-                    seconds_remaining: remaining,
-                });
-            }
-        });
+        let timer_runtime = self.runtime.clone();
 
         let cancelled_during_connect = {
             let mut guard = self.inner.lock().await;
             if !matches!(guard.state, SessionState::Connecting) {
-                audio_task.abort();
-                server_task.abort();
-                timer_task.abort();
                 true
             } else {
+                let audio_task = tokio::spawn(async move {
+                    let mut resampler = AudioResampler::new(DEFAULT_CHUNK_SAMPLES);
+                    let mut transport_failed = false;
+
+                    while let Some(frame) = audio_rx.recv().await {
+                        for chunk in resampler.push_frame_immediate(&frame) {
+                            let rms = compute_normalized_rms(&chunk);
+                            let _ =
+                                audio_events_tx.send(ControllerEvent::AudioLevelUpdated { rms });
+                            let pcm_bytes = pcm_i16_to_le_bytes(&chunk);
+                            if audio_gemini_tx.send_audio_chunk(pcm_bytes).await.is_err() {
+                                transport_failed = true;
+                                break;
+                            }
+                        }
+                        if transport_failed {
+                            break;
+                        }
+                    }
+
+                    if !transport_failed {
+                        // `audio_rx` closed while the session was still active -> microphone disconnected.
+                        let disconnected_session = {
+                            let mut guard = audio_inner.lock().await;
+                            if matches!(
+                                guard.state,
+                                SessionState::Connecting | SessionState::Listening
+                            ) {
+                                let message =
+                                    "microphone disconnected during Dictation Session".to_string();
+                                guard.state = SessionState::Error {
+                                    message: message.clone(),
+                                };
+                                guard.ignore_next_release = true;
+                                Some((guard.active_session.take(), message))
+                            } else {
+                                None
+                            }
+                        };
+
+                        if let Some((maybe_session, message)) = disconnected_session {
+                            tracing::warn!(
+                                status = "DEGRADED",
+                                component = "audio",
+                                cause = %message,
+                                "microphone stream ended unexpectedly during active Dictation Session"
+                            );
+                            if let Some(active) = maybe_session {
+                                active.server_task.abort();
+                                active.timer_task.abort();
+                                active.gemini_tx.close().await;
+                            }
+                            let _ = audio_events_tx.send(ControllerEvent::StateChanged {
+                                state: SessionState::Error {
+                                    message: message.clone(),
+                                },
+                            });
+                            let _ =
+                                audio_events_tx.send(ControllerEvent::ErrorOccurred { message });
+                            let _ = audio_events_tx.send(ControllerEvent::TrayStatusChanged {
+                                status: TrayStatus::Error,
+                            });
+                        }
+                    }
+                });
+
+                let server_task = tokio::spawn(async move {
+                    let mut final_tx = Some(final_tx);
+                    while let Some(item) = gemini_rx.recv().await {
+                        match item {
+                            Ok(GeminiServerEvent::SetupComplete) => {}
+                            Ok(GeminiServerEvent::DraftTranscript { text }) => {
+                                *server_draft.lock().await = text.clone();
+                                let _ = server_events_tx.send(
+                                    ControllerEvent::DraftTranscriptUpdated {
+                                        draft_transcript: text,
+                                    },
+                                );
+                            }
+                            Ok(GeminiServerEvent::FinalTranscript { text }) => {
+                                if let Some(tx) = final_tx.take() {
+                                    let _ = tx.send(Ok(text));
+                                }
+                                break;
+                            }
+                            Ok(GeminiServerEvent::Error { message }) => {
+                                if server_runtime
+                                    .handle_mid_stream_disconnect(message.clone())
+                                    .await
+                                {
+                                    let _ = final_tx.take();
+                                } else if let Some(tx) = final_tx.take() {
+                                    let _ = tx.send(Err(
+                                        DictationError::TranscriptionTransportFailed(message),
+                                    ));
+                                }
+                                break;
+                            }
+                            Err(err) => {
+                                if server_runtime
+                                    .handle_mid_stream_disconnect(err.to_string())
+                                    .await
+                                {
+                                    let _ = final_tx.take();
+                                } else if let Some(tx) = final_tx.take() {
+                                    let _ = tx.send(Err(err));
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    if let Some(tx) = final_tx.take() {
+                        let handled_mid_stream = server_runtime
+                            .handle_mid_stream_disconnect(
+                                "WebSocket connection closed unexpectedly".to_string(),
+                            )
+                            .await;
+                        if !handled_mid_stream {
+                            let fallback = server_draft.lock().await.clone();
+                            let _ = tx.send(Ok(fallback));
+                        }
+                    }
+                });
+
+                let timer_task = tokio::spawn(async move {
+                    if timers.warning_after < timers.hard_cap_after {
+                        tokio::time::sleep(timers.warning_after).await;
+                        let remaining = timers
+                            .hard_cap_after
+                            .saturating_sub(timers.warning_after)
+                            .as_secs();
+                        timer_runtime.emit(ControllerEvent::SessionWarning {
+                            seconds_remaining: remaining,
+                        });
+                        let remaining_wait =
+                            timers.hard_cap_after.saturating_sub(timers.warning_after);
+                        tokio::time::sleep(remaining_wait).await;
+                    } else {
+                        tokio::time::sleep(timers.hard_cap_after).await;
+                    }
+
+                    let _ = timer_runtime
+                        .finalize_active_session(FinalizeTrigger::HardCapTimeout)
+                        .await;
+                });
+
                 guard.active_session = Some(ActiveSession {
                     started_at: Instant::now(),
                     gemini_tx: gemini_tx.clone(),
@@ -418,6 +696,7 @@ impl DictationController {
                     final_rx: Some(final_rx),
                     latest_draft,
                 });
+                guard.state = SessionState::Listening;
                 false
             }
         };
@@ -427,103 +706,20 @@ impl DictationController {
             return Ok(());
         }
 
-        self.set_state(SessionState::Listening).await;
+        self.emit(ControllerEvent::StateChanged {
+            state: SessionState::Listening,
+        });
+        self.emit(ControllerEvent::TrayStatusChanged {
+            status: TrayStatus::Listening,
+        });
         Ok(())
     }
 
     /// Complete the active Dictation Session when the Push-to-Talk Hotkey is released.
     pub async fn handle_hotkey_released(&self) -> Result<Option<String>, DictationError> {
-        let mut active = {
-            let mut guard = self.inner.lock().await;
-            match guard.active_session.take() {
-                Some(session) => {
-                    guard.state = SessionState::Finalizing;
-                    session
-                }
-                None => return Err(DictationError::NoActiveSession),
-            }
-        };
-
-        self.emit(ControllerEvent::StateChanged {
-            state: SessionState::Finalizing,
-        });
-
-        // Stop capturing audio and signal end-of-audio to Gemini.
-        active.audio_task.abort();
-        active.timer_task.abort();
-        let _ = active.gemini_tx.send_end_of_audio().await;
-
-        let flush_timeout = self.gemini.config().flush_timeout;
-        let final_transcript = match active.final_rx.take() {
-            Some(rx) => match tokio::time::timeout(flush_timeout, rx).await {
-                Ok(Ok(Ok(text))) => text,
-                Ok(Ok(Err(err))) => {
-                    active.server_task.abort();
-                    active.gemini_tx.close().await;
-                    self.transition_to_error(err.to_string(), TrayStatus::Error)
-                        .await;
-                    return Err(err);
-                }
-                Ok(Err(_)) | Err(_) => {
-                    tracing::warn!(
-                        status = "DEGRADED",
-                        component = "controller",
-                        "finalization flush timed out; using latest Draft Transcript"
-                    );
-                    active.latest_draft.lock().await.clone()
-                }
-            },
-            None => active.latest_draft.lock().await.clone(),
-        };
-
-        active.server_task.abort();
-        active.gemini_tx.close().await;
-
-        let trimmed = final_transcript.trim();
-        if trimmed.is_empty() {
-            self.set_state(SessionState::Idle).await;
-            return Ok(None);
-        }
-
-        self.set_state(SessionState::Delivering).await;
-
-        let prefs = self.store.get_preferences().await.unwrap_or_default();
-        let outcome = self.delivery.deliver(trimmed, &prefs).await?;
-
-        let duration_ms = active.started_at.elapsed().as_millis() as u64;
-        let history_entry = HistoryEntry {
-            id: Uuid::new_v4().to_string(),
-            final_transcript: trimmed.to_string(),
-            created_at_utc: Utc::now().to_rfc3339(),
-            duration_ms,
-            was_partial: false,
-            delivery_mode: outcome.mode,
-        };
-        self.store.save_history_entry(&history_entry).await?;
-
-        self.emit(ControllerEvent::FinalTranscriptReady {
-            final_transcript: trimmed.to_string(),
-            delivery_mode: outcome.mode,
-        });
-
-        if outcome.mode == DeliveryMode::FallbackDelivery {
-            let reason = outcome
-                .fallback_reason
-                .unwrap_or_else(|| "Text Insertion unavailable".to_string());
-            self.emit(ControllerEvent::StateChanged {
-                state: SessionState::FallbackNotice {
-                    final_transcript: trimmed.to_string(),
-                    reason: reason.clone(),
-                },
-            });
-            self.emit(ControllerEvent::FallbackDeliveryNoticed {
-                final_transcript: trimmed.to_string(),
-                reason,
-            });
-        }
-
-        self.set_state(SessionState::Idle).await;
-        Ok(Some(trimmed.to_string()))
+        self.runtime
+            .finalize_active_session(FinalizeTrigger::HotkeyRelease)
+            .await
     }
 
     /// Abort an active Dictation Session (e.g. Escape key) without Text Insertion or History Entry.
@@ -578,20 +774,6 @@ impl DictationController {
     }
 
     async fn transition_to_error(&self, message: String, tray_status: TrayStatus) {
-        {
-            let mut guard = self.inner.lock().await;
-            guard.state = SessionState::Error {
-                message: message.clone(),
-            };
-        }
-        self.emit(ControllerEvent::StateChanged {
-            state: SessionState::Error {
-                message: message.clone(),
-            },
-        });
-        self.emit(ControllerEvent::ErrorOccurred { message });
-        self.emit(ControllerEvent::TrayStatusChanged {
-            status: tray_status,
-        });
+        self.runtime.transition_to_error(message, tray_status).await;
     }
 }
