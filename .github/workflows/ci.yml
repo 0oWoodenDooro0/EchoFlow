@@ -6,7 +6,43 @@ on:
   pull_request:
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust_core: ${{ steps.filter.outputs.rust_core }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      tauri_check: ${{ steps.filter.outputs.tauri_check }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust_core:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/**'
+              - '.github/workflows/ci.yml'
+            frontend:
+              - 'apps/desktop/src/**'
+              - 'apps/desktop/package.json'
+              - 'apps/desktop/package-lock.json'
+              - 'apps/desktop/biome.json'
+              - 'apps/desktop/tsconfig*.json'
+              - 'apps/desktop/vite.config.*'
+              - 'apps/desktop/index.html'
+              - 'apps/desktop/src-tauri/src/lib.rs'
+              - '.github/workflows/ci.yml'
+            tauri_check:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/**'
+              - 'apps/desktop/**'
+              - '.github/workflows/ci.yml'
+
   rust-core:
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.rust_core == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,6 +55,8 @@ jobs:
       - run: cargo test --workspace --all-features
 
   frontend:
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -36,6 +74,8 @@ jobs:
       - run: npm run build
 
   tauri-check:
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.tauri_check == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
