@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { GeneralSettingsTab } from "./GeneralSettingsTab";
+import { MicrophoneSelector } from "./MicrophoneSelector";
 
 type SettingsTab = "onboarding" | "general" | "vocabulary" | "history";
 
@@ -52,7 +53,12 @@ export function SettingsWindow() {
             </p>
           </section>
         )}
-        {activeTab === "general" && <GeneralSettingsTab />}
+        {activeTab === "general" && (
+          <div className="space-y-6">
+            <GeneralSettingsTab />
+            <MicrophoneSelector />
+          </div>
+        )}
         {activeTab === "vocabulary" && (
           <section>
             <h2 className="mb-2 text-base font-medium text-white">

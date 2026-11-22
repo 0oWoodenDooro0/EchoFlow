@@ -42,9 +42,13 @@ export function OverlayPill() {
         case "draft_transcript_updated":
           setDraftTranscript(event.draft_transcript);
           break;
-        case "audio_level_updated":
-          setAudioLevel(Math.max(0, Math.min(1, event.rms)));
+        case "audio_level_updated": {
+          const clamped = Number.isFinite(event.rms)
+            ? Math.max(0, Math.min(1, event.rms))
+            : 0;
+          setAudioLevel(clamped);
           break;
+        }
         case "session_warning":
           setSecondsRemaining(event.seconds_remaining);
           break;
@@ -109,6 +113,7 @@ export function OverlayPill() {
             <div
               className="flex h-5 items-center gap-0.5"
               aria-label="Audio waveform"
+              data-rms={audioLevel.toFixed(2)}
             >
               {waveformBars}
             </div>

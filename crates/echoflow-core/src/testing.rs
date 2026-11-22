@@ -23,6 +23,8 @@ pub struct FakePlatformAdapter {
     clipboard_ops: Mutex<Vec<ClipboardOp>>,
     audio_frames: Mutex<VecDeque<PcmFrame>>,
     devices: Mutex<Vec<AudioDeviceInfo>>,
+    requested_device_ids: Mutex<Vec<Option<String>>>,
+    close_audio_after_frames: Mutex<bool>,
     capabilities: Mutex<PlatformCapabilities>,
     fail_paste_with: Mutex<Option<String>>,
 }
@@ -58,6 +60,18 @@ impl FakePlatformAdapter {
         }
     }
 
+    pub fn set_audio_devices(&self, devices: Vec<AudioDeviceInfo>) {
+        *self.devices.lock().unwrap() = devices;
+    }
+
+    pub fn set_close_audio_after_frames(&self, close: bool) {
+        *self.close_audio_after_frames.lock().unwrap() = close;
+    }
+
+    pub fn recorded_requested_device_ids(&self) -> Vec<Option<String>> {
+        self.requested_device_ids.lock().unwrap().clone()
+    }
+
     pub fn set_fail_paste(&self, reason: Option<String>) {
         *self.fail_paste_with.lock().unwrap() = reason;
     }
@@ -87,9 +101,14 @@ impl PlatformAdapter for FakePlatformAdapter {
 
     async fn start_audio_capture(
         &self,
-        _device_id: Option<&str>,
+        device_id: Option<&str>,
     ) -> Result<mpsc::Receiver<PcmFrame>, DictationError> {
+        self.requested_device_ids
+            .lock()
+            .unwrap()
+            .push(device_id.map(str::to_string));
         let frames: Vec<PcmFrame> = self.audio_frames.lock().unwrap().drain(..).collect();
+        let close_after = *self.close_audio_after_frames.lock().unwrap();
         let (tx, rx) = mpsc::channel(32);
         tokio::spawn(async move {
             for frame in frames {
@@ -97,8 +116,10 @@ impl PlatformAdapter for FakePlatformAdapter {
                     break;
                 }
             }
-            // Keep sender alive until consumer stops capture so the channel doesn't close prematurely.
-            std::future::pending::<()>().await;
+            if !close_after {
+                // Keep sender alive until consumer stops capture so the channel doesn't close prematurely.
+                std::future::pending::<()>().await;
+            }
         });
         Ok(rx)
     }

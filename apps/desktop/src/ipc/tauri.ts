@@ -38,6 +38,12 @@ export interface AppPreferences {
   history_retention_days: number;
 }
 
+export interface AudioDeviceInfo {
+  id: string;
+  name: string;
+  is_default: boolean;
+}
+
 export type SessionState =
   | { kind: "idle" }
   | { kind: "connecting" }
@@ -95,6 +101,18 @@ export async function saveGeneralSettings(params: {
 
 export async function getPlatformCapabilities(): Promise<PlatformCapabilities> {
   return invoke<PlatformCapabilities>("get_platform_capabilities");
+}
+
+export async function listAudioDevices(): Promise<AudioDeviceInfo[]> {
+  return invoke<AudioDeviceInfo[]>("list_audio_devices");
+}
+
+export async function getSelectedMicrophone(): Promise<string | null> {
+  return invoke<string | null>("get_selected_microphone");
+}
+
+export async function selectMicrophone(deviceId: string | null): Promise<void> {
+  return invoke<void>("select_microphone", { deviceId });
 }
 
 export async function subscribeControllerEvents(
