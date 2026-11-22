@@ -1,0 +1,4 @@
+[workspace]
+resolver = "2"
+members = ["crates/echoflow-core"]
+exclude = ["apps/desktop/src-tauri"]

@@ -1,0 +1,56 @@
+import { useState } from "react";
+import { GeneralSettingsTab } from "./GeneralSettingsTab";
+import { HistoryTab } from "./HistoryTab";
+import { MicrophoneSelector } from "./MicrophoneSelector";
+import { OnboardingPanel } from "./OnboardingPanel";
+import { VocabularyTab } from "./VocabularyTab";
+
+type SettingsTab = "onboarding" | "general" | "vocabulary" | "history";
+
+export function SettingsWindow() {
+  const [activeTab, setActiveTab] = useState<SettingsTab>("onboarding");
+
+  const tabs: { id: SettingsTab; label: string }[] = [
+    { id: "onboarding", label: "Credentials" },
+    { id: "general", label: "General" },
+    { id: "vocabulary", label: "Vocabulary" },
+    { id: "history", label: "History" },
+  ];
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100">
+      <header className="border-b border-slate-800 px-6 py-4">
+        <h1 className="text-lg font-semibold">EchoFlow</h1>
+      </header>
+
+      <nav className="flex gap-2 border-b border-slate-800 px-6 py-2">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setActiveTab(tab.id)}
+            className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+              activeTab === tab.id
+                ? "bg-slate-800 text-white"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </nav>
+
+      <main className="p-6 text-sm text-slate-300">
+        {activeTab === "onboarding" && <OnboardingPanel />}
+        {activeTab === "general" && (
+          <div className="space-y-6">
+            <GeneralSettingsTab />
+            <MicrophoneSelector />
+          </div>
+        )}
+        {activeTab === "vocabulary" && <VocabularyTab />}
+        {activeTab === "history" && <HistoryTab />}
+      </main>
+    </div>
+  );
+}
