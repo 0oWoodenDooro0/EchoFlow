@@ -13,7 +13,7 @@ use crate::domain::{
     ControllerEvent, DeliveryMode, DictationError, HistoryEntry, SessionState, TrayStatus,
 };
 use crate::gemini::{GeminiLiveClient, GeminiServerEvent, GeminiSessionSender};
-use crate::platform::PlatformAdapter;
+use crate::platform::{HotkeyEvent, PlatformAdapter};
 use crate::store::LocalStore;
 
 /// Configurable session warning (9:30) and hard cap (10:00) timers (ADR-0002).
@@ -115,6 +115,19 @@ impl DictationController {
         self.emit(ControllerEvent::TrayStatusChanged { status: tray });
     }
 
+    async fn is_connecting(&self) -> bool {
+        matches!(self.inner.lock().await.state, SessionState::Connecting)
+    }
+
+    /// Dispatch a `HotkeyEvent` from `PlatformAdapter::start_hotkey_listener`.
+    pub async fn handle_hotkey_event(&self, event: HotkeyEvent) -> Result<(), DictationError> {
+        match event {
+            HotkeyEvent::Pressed => self.handle_hotkey_pressed().await,
+            HotkeyEvent::Released => self.handle_hotkey_released().await.map(|_| ()),
+            HotkeyEvent::EscapeCancelled => self.handle_escape_cancelled().await,
+        }
+    }
+
     /// Start a Dictation Session when the Push-to-Talk Hotkey is pressed.
     ///
     /// Rejects duplicate presses while a session is already active without corrupting state.
@@ -145,17 +158,27 @@ impl DictationController {
         let api_key = match self.platform.get_provider_credential().await {
             Ok(Some(key)) if !key.trim().is_empty() => key,
             Ok(_) => {
+                if !self.is_connecting().await {
+                    return Ok(());
+                }
                 let err = DictationError::MissingProviderCredential;
                 self.transition_to_error(err.to_string(), TrayStatus::MissingCredential)
                     .await;
                 return Err(err);
             }
             Err(err) => {
+                if !self.is_connecting().await {
+                    return Ok(());
+                }
                 self.transition_to_error(err.to_string(), TrayStatus::Error)
                     .await;
                 return Err(err);
             }
         };
+
+        if !self.is_connecting().await {
+            return Ok(());
+        }
 
         let prefs = self.store.get_preferences().await.unwrap_or_default();
         let vocabulary = self.store.list_vocabulary_terms().await.unwrap_or_default();
@@ -163,11 +186,20 @@ impl DictationController {
         let session = match self.gemini.connect(&api_key, &vocabulary).await {
             Ok(session) => session,
             Err(err) => {
+                if !self.is_connecting().await {
+                    return Ok(());
+                }
                 self.transition_to_error(err.to_string(), TrayStatus::Error)
                     .await;
                 return Err(err);
             }
         };
+
+        if !self.is_connecting().await {
+            let (tx, _) = session.split();
+            tx.close().await;
+            return Ok(());
+        }
 
         let mut audio_rx = match self
             .platform
@@ -176,6 +208,11 @@ impl DictationController {
         {
             Ok(rx) => rx,
             Err(err) => {
+                if !self.is_connecting().await {
+                    let (tx, _) = session.split();
+                    tx.close().await;
+                    return Ok(());
+                }
                 self.transition_to_error(err.to_string(), TrayStatus::Error)
                     .await;
                 return Err(err);
@@ -258,17 +295,30 @@ impl DictationController {
             }
         });
 
-        {
+        let cancelled_during_connect = {
             let mut guard = self.inner.lock().await;
-            guard.active_session = Some(ActiveSession {
-                started_at: Instant::now(),
-                gemini_tx,
-                audio_task,
-                server_task,
-                timer_task,
-                final_rx: Some(final_rx),
-                latest_draft,
-            });
+            if !matches!(guard.state, SessionState::Connecting) {
+                audio_task.abort();
+                server_task.abort();
+                timer_task.abort();
+                true
+            } else {
+                guard.active_session = Some(ActiveSession {
+                    started_at: Instant::now(),
+                    gemini_tx: gemini_tx.clone(),
+                    audio_task,
+                    server_task,
+                    timer_task,
+                    final_rx: Some(final_rx),
+                    latest_draft,
+                });
+                false
+            }
+        };
+
+        if cancelled_during_connect {
+            gemini_tx.close().await;
+            return Ok(());
         }
 
         self.set_state(SessionState::Listening).await;

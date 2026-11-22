@@ -7,6 +7,7 @@ pub mod controller;
 pub mod delivery;
 pub mod domain;
 pub mod gemini;
+pub mod hotkey;
 pub mod platform;
 pub mod store;
 

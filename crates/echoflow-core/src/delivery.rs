@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::domain::{AppPreferences, DeliveryMode, DictationError};
+use crate::domain::{AppPreferences, DeliveryMode, DictationError, DisplayServer};
 use crate::platform::PlatformAdapter;
 
 /// Executes Text Insertion with Clipboard Preservation, degrading to Fallback Delivery on failure.
@@ -27,6 +27,29 @@ impl DeliveryService {
         final_transcript: &str,
         prefs: &AppPreferences,
     ) -> Result<DeliveryOutcome, DictationError> {
+        if let Ok(caps) = self.platform.probe_capabilities().await {
+            if !caps.supports_text_insertion {
+                self.platform.write_clipboard(final_transcript).await?;
+                let reason = match caps.display_server {
+                    DisplayServer::LinuxWayland => {
+                        "Text Insertion unavailable on Linux Wayland (missing ydotool/wtype)"
+                            .to_string()
+                    }
+                    _ => "Text Insertion unavailable on current platform".to_string(),
+                };
+                tracing::warn!(
+                    status = "DEGRADED",
+                    component = "delivery",
+                    cause = %reason,
+                    "Text Insertion unsupported; degrading to Fallback Delivery (clipboard preserved)"
+                );
+                return Ok(DeliveryOutcome {
+                    mode: DeliveryMode::FallbackDelivery,
+                    fallback_reason: Some(reason),
+                });
+            }
+        }
+
         let snapshot = self.platform.read_clipboard().await?;
         self.platform.write_clipboard(final_transcript).await?;
 
