@@ -4,7 +4,8 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode};
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::domain::DictationError;
@@ -14,6 +15,9 @@ pub const DEFAULT_GEMINI_MODEL: &str = "gemini-3.5-transcribe-live";
 
 /// Default transcription mode (ADR-0002).
 pub const DEFAULT_GEMINI_MODE: &str = "SMART";
+
+/// Maximum Custom Vocabulary biasing terms forwarded in session setup (ADR-0002).
+pub const MAX_VOCABULARY_TERMS: usize = 1_000;
 
 /// Configuration for `GeminiLiveClient`.
 #[derive(Debug, Clone)]
@@ -56,6 +60,7 @@ struct EndOfAudioMessage<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GeminiServerEvent {
+    SetupComplete,
     DraftTranscript { text: String },
     FinalTranscript { text: String },
     Error { message: String },
@@ -135,14 +140,17 @@ impl GeminiLiveClient {
         &self.config
     }
 
-    /// Connect to the configured endpoint, send the `SMART` setup frame, and return a session handle.
-    pub async fn connect(
+    fn build_ws_request(
         &self,
         api_key: &str,
-        vocabulary: &[String],
-    ) -> Result<GeminiLiveSession, DictationError> {
+    ) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, DictationError> {
         if api_key.trim().is_empty() {
             return Err(DictationError::MissingProviderCredential);
+        }
+        if api_key.chars().any(char::is_whitespace) {
+            return Err(DictationError::InvalidInput(
+                "malformed Provider Credential: whitespace is not allowed".to_string(),
+            ));
         }
 
         let mut request = self
@@ -155,26 +163,131 @@ impl GeminiLiveClient {
         let header_value = HeaderValue::from_str(api_key)
             .map_err(|e| DictationError::InvalidInput(format!("invalid API key header: {e}")))?;
         request.headers_mut().insert("x-goog-api-key", header_value);
+        Ok(request)
+    }
 
-        let (ws_stream, _) = tokio_tungstenite::connect_async(request)
-            .await
-            .map_err(|e| DictationError::TranscriptionTransportFailed(e.to_string()))?;
+    fn build_setup_json(&self, vocabulary: &[String]) -> Result<String, DictationError> {
+        let filtered: Vec<String> = vocabulary
+            .iter()
+            .map(|term| term.trim())
+            .filter(|term| !term.is_empty())
+            .map(ToString::to_string)
+            .collect();
 
-        let (mut ws_write, mut ws_read) = ws_stream.split();
+        let normalized: Vec<String> = if filtered.len() > MAX_VOCABULARY_TERMS {
+            tracing::warn!(
+                status = "DEGRADED",
+                component = "gemini",
+                supplied = filtered.len(),
+                cap = MAX_VOCABULARY_TERMS,
+                "Custom Vocabulary exceeded cap; truncating to 1,000 terms"
+            );
+            filtered.into_iter().take(MAX_VOCABULARY_TERMS).collect()
+        } else {
+            filtered
+        };
 
         let setup = SetupMessage {
             msg_type: "setup",
             model: &self.config.model,
             mode: &self.config.mode,
-            vocabulary,
+            vocabulary: &normalized,
         };
-        let setup_json = serde_json::to_string(&setup)
-            .map_err(|e| DictationError::TranscriptionTransportFailed(e.to_string()))?;
+        serde_json::to_string(&setup)
+            .map_err(|e| DictationError::TranscriptionTransportFailed(e.to_string()))
+    }
+
+    /// Lightweight credential verification handshake for Settings "Test Connection".
+    ///
+    /// Rejects missing, malformed, or unauthorized Provider Credential responses with a
+    /// clear, structured `DictationError`.
+    pub async fn verify_credential(&self, api_key: &str) -> Result<(), DictationError> {
+        let request = self.build_ws_request(api_key)?;
+        let (ws_stream, _) = tokio::time::timeout(
+            self.config.flush_timeout,
+            tokio_tungstenite::connect_async(request),
+        )
+        .await
+        .map_err(|_| {
+            DictationError::TranscriptionTransportFailed(
+                "credential verification connection timed out".to_string(),
+            )
+        })?
+        .map_err(map_ws_error)?;
+
+        let (mut ws_write, mut ws_read) = ws_stream.split();
+        let setup_json = self.build_setup_json(&[])?;
+        ws_write
+            .send(Message::Text(setup_json.into()))
+            .await
+            .map_err(map_ws_error)?;
+
+        let outcome = tokio::time::timeout(self.config.flush_timeout, async {
+            while let Some(item) = ws_read.next().await {
+                match item {
+                    Ok(Message::Text(text)) => {
+                        match serde_json::from_str::<GeminiServerEvent>(&text) {
+                            Ok(GeminiServerEvent::SetupComplete)
+                            | Ok(GeminiServerEvent::DraftTranscript { .. })
+                            | Ok(GeminiServerEvent::FinalTranscript { .. }) => return Ok(()),
+                            Ok(GeminiServerEvent::Error { message }) => {
+                                return Err(classify_server_error(message));
+                            }
+                            Err(err) => {
+                                return Err(DictationError::TranscriptionTransportFailed(format!(
+                                    "malformed server handshake response: {err}"
+                                )));
+                            }
+                        }
+                    }
+                    Ok(Message::Close(Some(frame))) => {
+                        if frame.code == CloseCode::Normal {
+                            return Ok(());
+                        }
+                        return Err(classify_server_error(format!(
+                            "WebSocket closed ({:?}): {}",
+                            frame.code, frame.reason
+                        )));
+                    }
+                    Ok(Message::Close(None)) => return Ok(()),
+                    Ok(_) => {}
+                    Err(err) => return Err(map_ws_error(err)),
+                }
+            }
+            Ok(())
+        })
+        .await;
+
+        let _ = ws_write.send(Message::Close(None)).await;
+
+        match outcome {
+            Ok(result) => result,
+            Err(_) => Err(DictationError::TranscriptionTransportFailed(
+                "credential verification handshake timed out".to_string(),
+            )),
+        }
+    }
+
+    /// Connect to the configured endpoint, send the `SMART` setup frame, and return a session handle.
+    pub async fn connect(
+        &self,
+        api_key: &str,
+        vocabulary: &[String],
+    ) -> Result<GeminiLiveSession, DictationError> {
+        let request = self.build_ws_request(api_key)?;
+
+        let (ws_stream, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .map_err(map_ws_error)?;
+
+        let (mut ws_write, mut ws_read) = ws_stream.split();
+
+        let setup_json = self.build_setup_json(vocabulary)?;
 
         ws_write
             .send(Message::Text(setup_json.into()))
             .await
-            .map_err(|e| DictationError::TranscriptionTransportFailed(e.to_string()))?;
+            .map_err(map_ws_error)?;
 
         let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundCommand>(64);
         let (inbound_tx, inbound_rx) =
@@ -243,5 +356,36 @@ impl GeminiLiveClient {
             outbound_tx,
             inbound_rx,
         })
+    }
+}
+
+fn map_ws_error(err: tokio_tungstenite::tungstenite::Error) -> DictationError {
+    if let tokio_tungstenite::tungstenite::Error::Http(resp) = &err {
+        if matches!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+            return DictationError::UnauthorizedProviderCredential(format!(
+                "HTTP {}",
+                resp.status()
+            ));
+        }
+    }
+    DictationError::TranscriptionTransportFailed(err.to_string())
+}
+
+fn classify_server_error(message: String) -> DictationError {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("unauthorized")
+        || lower.contains("forbidden")
+        || lower.contains("401")
+        || lower.contains("403")
+        || lower.contains("api key")
+        || lower.contains("invalid key")
+        || lower.contains("unauthenticated")
+    {
+        DictationError::UnauthorizedProviderCredential(message)
+    } else {
+        DictationError::TranscriptionTransportFailed(message)
     }
 }

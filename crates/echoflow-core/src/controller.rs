@@ -210,6 +210,7 @@ impl DictationController {
             let mut final_tx = Some(final_tx);
             while let Some(item) = gemini_rx.recv().await {
                 match item {
+                    Ok(GeminiServerEvent::SetupComplete) => {}
                     Ok(GeminiServerEvent::DraftTranscript { text }) => {
                         *server_draft.lock().await = text.clone();
                         let _ = server_events_tx.send(ControllerEvent::DraftTranscriptUpdated {

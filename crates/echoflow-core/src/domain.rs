@@ -187,6 +187,9 @@ pub enum DictationError {
     #[error("Provider Credential is missing")]
     MissingProviderCredential,
 
+    #[error("unauthorized Provider Credential: {0}")]
+    UnauthorizedProviderCredential(String),
+
     #[error("audio capture failed: {0}")]
     AudioCaptureFailed(String),
 
