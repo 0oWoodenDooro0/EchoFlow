@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { HistoryTab } from "./HistoryTab";
+import { VocabularyTab } from "./VocabularyTab";
 
 type SettingsTab = "onboarding" | "general" | "vocabulary" | "history";
 
@@ -62,26 +64,8 @@ export function SettingsWindow() {
             </p>
           </section>
         )}
-        {activeTab === "vocabulary" && (
-          <section>
-            <h2 className="mb-2 text-base font-medium text-white">
-              Custom Vocabulary (0 / 1,000)
-            </h2>
-            <p className="text-slate-400">
-              Manage domain jargon and proper nouns for recognition biasing.
-            </p>
-          </section>
-        )}
-        {activeTab === "history" && (
-          <section>
-            <h2 className="mb-2 text-base font-medium text-white">
-              History Entry Archive
-            </h2>
-            <p className="text-slate-400">
-              Text-only local records of completed Dictation Sessions.
-            </p>
-          </section>
-        )}
+        {activeTab === "vocabulary" && <VocabularyTab />}
+        {activeTab === "history" && <HistoryTab />}
       </main>
     </div>
   );

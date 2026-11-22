@@ -57,3 +57,89 @@ export async function subscribeControllerEvents(
     handler(event.payload);
   });
 }
+
+export const MAX_VOCABULARY_TERMS = 1000;
+
+export interface HistoryEntry {
+  id: string;
+  final_transcript: string;
+  created_at_utc: string;
+  duration_ms: number;
+  was_partial: boolean;
+  delivery_mode: DeliveryMode;
+}
+
+export interface VocabularyEntry {
+  id: string;
+  term: string;
+  created_at_utc: string;
+}
+
+export interface AppPreferences {
+  push_to_talk_hotkey: string;
+  microphone_id: string | null;
+  restore_clipboard: boolean;
+  clipboard_restore_delay_ms: number;
+  history_retention_days: number;
+}
+
+export async function listHistoryEntries(): Promise<HistoryEntry[]> {
+  return invoke<HistoryEntry[]>("list_history_entries");
+}
+
+export async function searchHistoryEntries(
+  query: string,
+): Promise<HistoryEntry[]> {
+  return invoke<HistoryEntry[]>("search_history_entries", { query });
+}
+
+export async function deleteHistoryEntry(id: string): Promise<boolean> {
+  return invoke<boolean>("delete_history_entry", { id });
+}
+
+export async function clearHistory(): Promise<number> {
+  return invoke<number>("clear_history");
+}
+
+export async function listVocabularyEntries(): Promise<VocabularyEntry[]> {
+  return invoke<VocabularyEntry[]>("list_vocabulary_entries");
+}
+
+export async function searchVocabularyEntries(
+  query: string,
+): Promise<VocabularyEntry[]> {
+  return invoke<VocabularyEntry[]>("search_vocabulary_entries", { query });
+}
+
+export async function addVocabularyTerm(
+  term: string,
+): Promise<VocabularyEntry> {
+  return invoke<VocabularyEntry>("add_vocabulary_term", { term });
+}
+
+export async function updateVocabularyTerm(
+  id: string,
+  newTerm: string,
+): Promise<VocabularyEntry> {
+  return invoke<VocabularyEntry>("update_vocabulary_term", { id, newTerm });
+}
+
+export async function deleteVocabularyTerm(id: string): Promise<boolean> {
+  return invoke<boolean>("delete_vocabulary_term", { id });
+}
+
+export async function getPreferences(): Promise<AppPreferences> {
+  return invoke<AppPreferences>("get_preferences");
+}
+
+export async function savePreferences(prefs: AppPreferences): Promise<void> {
+  return invoke<void>("save_preferences", { prefs });
+}
+
+export async function exportSettingsJson(): Promise<string> {
+  return invoke<string>("export_settings_json");
+}
+
+export async function importSettingsJson(json: string): Promise<void> {
+  return invoke<void>("import_settings_json", { json });
+}

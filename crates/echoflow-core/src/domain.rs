@@ -112,6 +112,18 @@ pub struct VocabularyEntry {
     pub created_at_utc: String,
 }
 
+/// Hard cap on Custom Vocabulary entries (ADR / Issue #5).
+pub const MAX_VOCABULARY_TERMS: usize = 1000;
+
+/// Minimum allowed history retention period in days.
+pub const MIN_HISTORY_RETENTION_DAYS: u32 = 1;
+
+/// Maximum allowed history retention period in days.
+pub const MAX_HISTORY_RETENTION_DAYS: u32 = 3650;
+
+/// Current schema version for JSON settings & vocabulary export/import.
+pub const SETTINGS_EXPORT_SCHEMA_VERSION: u32 = 1;
+
 /// Non-secret local application preferences.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppPreferences {
@@ -120,6 +132,17 @@ pub struct AppPreferences {
     pub restore_clipboard: bool,
     pub clipboard_restore_delay_ms: u64,
     pub history_retention_days: u32,
+}
+
+/// Versioned JSON export/import payload for non-secret preferences and Custom Vocabulary.
+///
+/// Explicitly excludes Provider Credential and History Entry records (ADR-0004).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsExportPayload {
+    pub schema_version: u32,
+    pub exported_at_utc: String,
+    pub preferences: AppPreferences,
+    pub vocabulary: Vec<String>,
 }
 
 impl Default for AppPreferences {

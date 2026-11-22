@@ -3,12 +3,12 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use echoflow_core::controller::{DictationController, SessionTimersConfig};
 use echoflow_core::domain::{
-    AudioDeviceInfo, ControllerEvent, DictationError, PlatformCapabilities, SessionState,
-    TrayStatus,
+    AppPreferences, AudioDeviceInfo, ControllerEvent, DictationError, HistoryEntry,
+    PlatformCapabilities, SessionState, TrayStatus, VocabularyEntry,
 };
 use echoflow_core::gemini::{GeminiClientConfig, GeminiLiveClient};
 use echoflow_core::platform::{ClipboardSnapshot, HotkeyEvent, PcmFrame, PlatformAdapter};
-use echoflow_core::store::InMemoryLocalStore;
+use echoflow_core::store::{LocalStore, SqliteLocalStore};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -88,6 +88,7 @@ impl PlatformAdapter for DesktopPlatformAdapter {
 
 struct AppState {
     controller: Arc<DictationController>,
+    store: Arc<dyn LocalStore>,
 }
 
 #[tauri::command]
@@ -122,6 +123,137 @@ async fn cancel_dictation_session(state: State<'_, AppState>) -> Result<(), Stri
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn list_history_entries(state: State<'_, AppState>) -> Result<Vec<HistoryEntry>, String> {
+    state
+        .store
+        .list_history_entries()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn search_history_entries(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<HistoryEntry>, String> {
+    state
+        .store
+        .search_history_entries(&query)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_history_entry(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    state
+        .store
+        .delete_history_entry(&id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn clear_history(state: State<'_, AppState>) -> Result<usize, String> {
+    state.store.clear_history().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_vocabulary_entries(
+    state: State<'_, AppState>,
+) -> Result<Vec<VocabularyEntry>, String> {
+    state
+        .store
+        .list_vocabulary_entries()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn search_vocabulary_entries(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<VocabularyEntry>, String> {
+    state
+        .store
+        .search_vocabulary_entries(&query)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn add_vocabulary_term(
+    state: State<'_, AppState>,
+    term: String,
+) -> Result<VocabularyEntry, String> {
+    state
+        .store
+        .add_vocabulary_term(&term)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn update_vocabulary_term(
+    state: State<'_, AppState>,
+    id: String,
+    new_term: String,
+) -> Result<VocabularyEntry, String> {
+    state
+        .store
+        .update_vocabulary_term(&id, &new_term)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_vocabulary_term(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    state
+        .store
+        .delete_vocabulary_term(&id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_preferences(state: State<'_, AppState>) -> Result<AppPreferences, String> {
+    state
+        .store
+        .get_preferences()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn save_preferences(
+    state: State<'_, AppState>,
+    prefs: AppPreferences,
+) -> Result<(), String> {
+    state
+        .store
+        .save_preferences(&prefs)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn export_settings_json(state: State<'_, AppState>) -> Result<String, String> {
+    state
+        .store
+        .export_settings_json()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn import_settings_json(state: State<'_, AppState>, json: String) -> Result<(), String> {
+    state
+        .store
+        .import_settings_json(&json)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 fn open_settings_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("settings") {
         let _ = window.show();
@@ -146,24 +278,37 @@ fn tray_status_label(status: TrayStatus) -> &'static str {
 
 pub fn run() {
     let platform = Arc::new(DesktopPlatformAdapter::default());
-    let store = Arc::new(InMemoryLocalStore::new());
+    let store = Arc::new(SqliteLocalStore::open_in_memory().expect("failed to initialize local store"));
     let gemini = GeminiLiveClient::new(GeminiClientConfig::default());
     let controller = Arc::new(DictationController::new(
         platform,
         gemini,
-        store,
+        Arc::clone(&store) as Arc<dyn LocalStore>,
         SessionTimersConfig::default(),
     ));
 
     let controller_for_setup = Arc::clone(&controller);
 
     tauri::Builder::default()
-        .manage(AppState { controller })
+        .manage(AppState { controller, store })
         .invoke_handler(tauri::generate_handler![
             get_session_state,
             simulate_hotkey_press,
             simulate_hotkey_release,
             cancel_dictation_session,
+            list_history_entries,
+            search_history_entries,
+            delete_history_entry,
+            clear_history,
+            list_vocabulary_entries,
+            search_vocabulary_entries,
+            add_vocabulary_term,
+            update_vocabulary_term,
+            delete_vocabulary_term,
+            get_preferences,
+            save_preferences,
+            export_settings_json,
+            import_settings_json,
         ])
         .setup(move |app| {
             let status_item = MenuItem::with_id(
