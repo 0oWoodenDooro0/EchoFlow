@@ -2,6 +2,7 @@ import { useState } from "react";
 import { GeneralSettingsTab } from "./GeneralSettingsTab";
 import { HistoryTab } from "./HistoryTab";
 import { MicrophoneSelector } from "./MicrophoneSelector";
+import { OnboardingPanel } from "./OnboardingPanel";
 import { VocabularyTab } from "./VocabularyTab";
 
 type SettingsTab = "onboarding" | "general" | "vocabulary" | "history";
@@ -44,17 +45,7 @@ export function SettingsWindow() {
       </nav>
 
       <main className="p-6 text-sm text-slate-300">
-        {activeTab === "onboarding" && (
-          <section>
-            <h2 className="mb-2 text-base font-medium text-white">
-              Provider Credential & OS Permissions
-            </h2>
-            <p className="text-slate-400">
-              Configure your Gemini API key in the OS native credential store
-              and verify platform capabilities.
-            </p>
-          </section>
-        )}
+        {activeTab === "onboarding" && <OnboardingPanel />}
         {activeTab === "general" && (
           <div className="space-y-6">
             <GeneralSettingsTab />

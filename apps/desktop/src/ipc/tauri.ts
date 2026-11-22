@@ -71,6 +71,43 @@ export type ControllerEvent =
     }
   | { type: "tray_status_changed"; status: TrayStatus };
 
+export type DisplayServer =
+  | "mac_os"
+  | "windows"
+  | "linux_x11"
+  | "linux_wayland"
+  | "unknown";
+
+export type PermissionStatus =
+  | "granted"
+  | "denied"
+  | "not_determined"
+  | "not_applicable";
+
+export interface PlatformCapabilities {
+  display_server: DisplayServer;
+  microphone_permission: PermissionStatus;
+  accessibility_permission: PermissionStatus;
+  supports_global_hotkey: boolean;
+  supports_text_insertion: boolean;
+  wayland_helpers: string[];
+  secret_service_available: boolean;
+}
+
+export interface ProviderCredentialStatus {
+  configured: boolean;
+  masked_preview: string | null;
+  secret_service_available: boolean;
+  degraded_reason: string | null;
+  guidance: string | null;
+}
+
+export interface ConnectionTestResult {
+  success: boolean;
+  message: string;
+  error_kind: string | null;
+}
+
 export async function getSessionState(): Promise<SessionState> {
   return invoke<SessionState>("get_session_state");
 }
@@ -99,6 +136,30 @@ export async function saveGeneralSettings(params: {
   return invoke<AppPreferences>("save_general_settings", params);
 }
 
+export async function getProviderCredentialStatus(): Promise<ProviderCredentialStatus> {
+  return invoke<ProviderCredentialStatus>("get_provider_credential_status");
+}
+
+export async function saveProviderCredential(
+  apiKey: string,
+): Promise<ProviderCredentialStatus> {
+  return invoke<ProviderCredentialStatus>("save_provider_credential", {
+    apiKey,
+  });
+}
+
+export async function deleteProviderCredential(): Promise<ProviderCredentialStatus> {
+  return invoke<ProviderCredentialStatus>("delete_provider_credential");
+}
+
+export async function testProviderConnection(
+  candidateKey?: string,
+): Promise<ConnectionTestResult> {
+  return invoke<ConnectionTestResult>("test_provider_connection", {
+    candidateKey: candidateKey ?? null,
+  });
+}
+
 export async function getPlatformCapabilities(): Promise<PlatformCapabilities> {
   return invoke<PlatformCapabilities>("get_platform_capabilities");
 }
@@ -113,6 +174,12 @@ export async function getSelectedMicrophone(): Promise<string | null> {
 
 export async function selectMicrophone(deviceId: string | null): Promise<void> {
   return invoke<void>("select_microphone", { deviceId });
+}
+
+export async function openPermissionSettings(
+  target: "microphone" | "accessibility",
+): Promise<void> {
+  return invoke<void>("open_permission_settings", { target });
 }
 
 export async function subscribeControllerEvents(

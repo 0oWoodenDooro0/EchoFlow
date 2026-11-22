@@ -1,5 +1,6 @@
 mod audio_adapter;
 mod clipboard_adapter;
+mod credential_adapter;
 mod hotkey_adapter;
 
 use std::sync::{Arc, Mutex};
@@ -7,6 +8,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use clipboard_adapter::DesktopClipboardAdapter;
 use echoflow_core::controller::{DictationController, SessionTimersConfig};
+use echoflow_core::credentials::{
+    ConnectionTestResult, ProviderCredentialService, ProviderCredentialStatus,
+};
 use echoflow_core::domain::{
     AppPreferences, AudioDeviceInfo, ControllerEvent, DictationError, HistoryEntry,
     PlatformCapabilities, SessionState, TrayStatus, VocabularyEntry,
@@ -20,18 +24,17 @@ use hotkey_adapter::{
 };
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::mpsc;
 
 pub const CONTROLLER_EVENT_NAME: &str = "echoflow://controller-event";
 
 /// Baseline desktop `PlatformAdapter` shell wired into Tauri v2.
 ///
-/// Downstream issues (#4 audio capture, #6 native keyring, #7 global hotkey & clipboard paste)
-/// replace these stubs with real OS backends.
+/// Uses OS native keyring via `credential_adapter` for Provider Credential storage
+/// and platform capability probing.
 #[derive(Default)]
 struct DesktopPlatformAdapter {
-    credential: Mutex<Option<String>>,
     clipboard: DesktopClipboardAdapter,
     hotkey_handle: Mutex<Option<HotkeyListenerHandle>>,
 }
@@ -76,21 +79,19 @@ impl PlatformAdapter for DesktopPlatformAdapter {
     }
 
     async fn get_provider_credential(&self) -> Result<Option<String>, DictationError> {
-        Ok(self.credential.lock().unwrap().clone())
+        credential_adapter::get_provider_credential().await
     }
 
     async fn set_provider_credential(&self, api_key: &str) -> Result<(), DictationError> {
-        *self.credential.lock().unwrap() = Some(api_key.to_string());
-        Ok(())
+        credential_adapter::set_provider_credential(api_key).await
     }
 
     async fn delete_provider_credential(&self) -> Result<(), DictationError> {
-        *self.credential.lock().unwrap() = None;
-        Ok(())
+        credential_adapter::delete_provider_credential().await
     }
 
     async fn probe_capabilities(&self) -> Result<PlatformCapabilities, DictationError> {
-        Ok(probe_platform_capabilities())
+        credential_adapter::probe_platform_capabilities().await
     }
 }
 
@@ -98,6 +99,8 @@ struct AppState {
     controller: Arc<DictationController>,
     store: Arc<dyn LocalStore>,
     platform: Arc<DesktopPlatformAdapter>,
+    credential_service: Arc<ProviderCredentialService>,
+    gemini: GeminiLiveClient,
 }
 
 async fn bind_and_forward_hotkey(
@@ -297,6 +300,51 @@ async fn save_general_settings(
 }
 
 #[tauri::command]
+async fn get_provider_credential_status(
+    state: State<'_, AppState>,
+) -> Result<ProviderCredentialStatus, String> {
+    Ok(state.credential_service.status().await)
+}
+
+#[tauri::command]
+async fn save_provider_credential(
+    state: State<'_, AppState>,
+    api_key: String,
+) -> Result<ProviderCredentialStatus, String> {
+    state
+        .credential_service
+        .save(&api_key)
+        .await
+        .map_err(|e| e.to_string())?;
+    state.controller.refresh_tray_status().await;
+    Ok(state.credential_service.status().await)
+}
+
+#[tauri::command]
+async fn delete_provider_credential(
+    state: State<'_, AppState>,
+) -> Result<ProviderCredentialStatus, String> {
+    state
+        .credential_service
+        .delete()
+        .await
+        .map_err(|e| e.to_string())?;
+    state.controller.refresh_tray_status().await;
+    Ok(state.credential_service.status().await)
+}
+
+#[tauri::command]
+async fn test_provider_connection(
+    state: State<'_, AppState>,
+    candidate_key: Option<String>,
+) -> Result<ConnectionTestResult, String> {
+    Ok(state
+        .credential_service
+        .test_connection(&state.gemini, candidate_key.as_deref())
+        .await)
+}
+
+#[tauri::command]
 async fn get_platform_capabilities(
     state: State<'_, AppState>,
 ) -> Result<PlatformCapabilities, String> {
@@ -355,6 +403,11 @@ async fn select_microphone(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn open_permission_settings(target: String) -> Result<(), String> {
+    credential_adapter::open_permission_settings(&target)
+}
+
 fn open_settings_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("settings") {
         let _ = window.show();
@@ -383,9 +436,10 @@ pub fn run() {
         SqliteLocalStore::open_in_memory().expect("failed to initialize local store"),
     );
     let gemini = GeminiLiveClient::new(GeminiClientConfig::default());
+    let credential_service = Arc::new(ProviderCredentialService::new(Arc::clone(&platform) as _));
     let controller = Arc::new(DictationController::new(
         Arc::clone(&platform) as _,
-        gemini,
+        gemini.clone(),
         Arc::clone(&store),
         SessionTimersConfig::default(),
     ));
@@ -394,11 +448,13 @@ pub fn run() {
     let platform_for_setup = Arc::clone(&platform);
     let store_for_setup = Arc::clone(&store);
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(AppState {
             controller,
             store,
             platform,
+            credential_service,
+            gemini,
         })
         .invoke_handler(tauri::generate_handler![
             get_session_state,
@@ -417,7 +473,12 @@ pub fn run() {
             get_preferences,
             save_preferences,
             save_general_settings,
+            get_provider_credential_status,
+            save_provider_credential,
+            delete_provider_credential,
+            test_provider_connection,
             get_platform_capabilities,
+            open_permission_settings,
             export_settings_json,
             import_settings_json,
             list_audio_devices,
@@ -553,8 +614,23 @@ pub fn run() {
                 }
             });
 
+            let controller_for_tray = Arc::clone(&controller_for_setup);
+            tauri::async_runtime::spawn(async move {
+                controller_for_tray.refresh_tray_status().await;
+            });
+
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running EchoFlow desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while building EchoFlow desktop application");
+
+    // Keep Rust Core and native system tray running when the Settings window is closed
+    // and its WebView is destroyed to minimize idle RAM (ADR-0001).
+    app.run(|_app_handle, event| {
+        if let RunEvent::ExitRequested { api, code, .. } = event {
+            if code.is_none() {
+                api.prevent_exit();
+            }
+        }
+    });
 }

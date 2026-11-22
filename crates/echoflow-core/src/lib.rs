@@ -4,6 +4,7 @@
 
 pub mod audio;
 pub mod controller;
+pub mod credentials;
 pub mod delivery;
 pub mod domain;
 pub mod gemini;
