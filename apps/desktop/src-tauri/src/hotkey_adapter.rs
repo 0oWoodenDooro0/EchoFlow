@@ -453,12 +453,116 @@ impl HotkeyListenerHandle {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn format_xdg_portal_trigger(binding: &HotkeyBinding) -> String {
+    let mut parts: Vec<String> = binding
+        .modifiers
+        .iter()
+        .map(|m| match m {
+            HotkeyModifier::Ctrl => "CTRL".to_string(),
+            HotkeyModifier::Alt => "ALT".to_string(),
+            HotkeyModifier::Shift => "SHIFT".to_string(),
+            HotkeyModifier::Meta => "LOGO".to_string(),
+        })
+        .collect();
+
+    let key_sym = match binding.key.as_str() {
+        "Space" => "space".to_string(),
+        "Enter" => "Return".to_string(),
+        "Backspace" => "BackSpace".to_string(),
+        "Escape" => "Escape".to_string(),
+        k if k.len() == 1 => k.to_ascii_lowercase(),
+        other => other.to_string(),
+    };
+    parts.push(key_sym);
+    parts.join("+")
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_wayland_portal_or_evdev_listener(
+    parsed: HotkeyBinding,
+    matcher: Arc<Mutex<HotkeyMatcher>>,
+    tx: mpsc::Sender<HotkeyEvent>,
+    stop_flag: Arc<AtomicBool>,
+) {
+    use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
+    use futures_util::StreamExt;
+
+    let trigger = format_xdg_portal_trigger(&parsed);
+    let binding_str = parsed.to_string();
+
+    tauri::async_runtime::spawn(async move {
+        let portal_result: Result<(), ashpd::Error> = async {
+            let portal = GlobalShortcuts::new().await?;
+            let session = portal.create_session().await?;
+            let shortcut = NewShortcut::new("push_to_talk", "EchoFlow Push-to-Talk")
+                .preferred_trigger(Some(trigger.as_str()));
+            let _ = portal.bind_shortcuts(&session, &[shortcut], None).await?;
+
+            tracing::info!(
+                component = "hotkey_adapter",
+                trigger = %trigger,
+                "registered Wayland XDG Desktop Portal GlobalShortcuts listener"
+            );
+
+            let mut activated = portal.receive_activated().await?;
+            let mut deactivated = portal.receive_deactivated().await?;
+            let mut stop_tick = tokio::time::interval(std::time::Duration::from_millis(200));
+
+            loop {
+                tokio::select! {
+                    _ = stop_tick.tick() => {
+                        if stop_flag.load(Ordering::SeqCst) {
+                            let _ = session.close().await;
+                            break;
+                        }
+                    }
+                    Some(ev) = activated.next() => {
+                        if ev.shortcut_id() == "push_to_talk" {
+                            let _ = tx.try_send(HotkeyEvent::Pressed);
+                        }
+                    }
+                    Some(ev) = deactivated.next() => {
+                        if ev.shortcut_id() == "push_to_talk" {
+                            let _ = tx.try_send(HotkeyEvent::Released);
+                        }
+                    }
+                    else => break,
+                }
+            }
+            Ok(())
+        }
+        .await;
+
+        if let Err(err) = portal_result {
+            if stop_flag.load(Ordering::SeqCst) {
+                return;
+            }
+            tracing::warn!(
+                status = "DEGRADED",
+                component = "hotkey_adapter",
+                cause = %err,
+                binding = %binding_str,
+                "XDG Desktop Portal GlobalShortcuts unavailable; falling back to evdev"
+            );
+            if has_readable_evdev() {
+                spawn_linux_evdev_listeners(matcher, tx, stop_flag);
+            } else {
+                // Keep sender alive until stop_flag is set so the receiver doesn't close immediately.
+                while !stop_flag.load(Ordering::SeqCst) {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                drop(tx);
+            }
+        }
+    });
+}
+
 /// Start listening for the validated Push-to-Talk Hotkey and Escape cancel events.
 ///
-/// Uses `rdev::listen` on macOS, Windows, and Linux X11, and reads `/dev/input/event*`
-/// directly on Linux Wayland when `evdev` is readable. Never steals window focus; on
-/// restricted Wayland sessions without `evdev`, emits a structured `DEGRADED` warning
-/// and keeps the channel open cleanly.
+/// Uses `rdev::listen` on macOS, Windows, and Linux X11, and XDG Desktop Portal
+/// `GlobalShortcuts` (falling back to `/dev/input/event*` `evdev`) on Linux Wayland.
+/// Never steals window focus.
 pub fn start_global_hotkey_listener(
     binding: &str,
 ) -> Result<(mpsc::Receiver<HotkeyEvent>, HotkeyListenerHandle), DictationError> {
@@ -468,6 +572,14 @@ pub fn start_global_hotkey_listener(
     let stop_clone = Arc::clone(&stop_flag);
 
     let caps = crate::credential_adapter::probe_platform_capabilities_sync();
+    let matcher = Arc::new(Mutex::new(HotkeyMatcher::new(parsed.clone())));
+
+    #[cfg(target_os = "linux")]
+    if caps.display_server == DisplayServer::LinuxWayland {
+        spawn_wayland_portal_or_evdev_listener(parsed, matcher, tx, stop_clone);
+        return Ok((rx, HotkeyListenerHandle { stop_flag }));
+    }
+
     if !caps.supports_global_hotkey {
         tracing::warn!(
             status = "DEGRADED",
@@ -483,14 +595,6 @@ pub fn start_global_hotkey_listener(
             }
             drop(tx);
         });
-        return Ok((rx, HotkeyListenerHandle { stop_flag }));
-    }
-
-    let matcher = Arc::new(Mutex::new(HotkeyMatcher::new(parsed.clone())));
-
-    #[cfg(target_os = "linux")]
-    if caps.display_server == DisplayServer::LinuxWayland {
-        spawn_linux_evdev_listeners(matcher, tx, stop_clone);
         return Ok((rx, HotkeyListenerHandle { stop_flag }));
     }
 
