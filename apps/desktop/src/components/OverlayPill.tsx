@@ -105,7 +105,7 @@ export function OverlayPill() {
       <div
         role="status"
         aria-live="polite"
-        className="flex w-full max-w-md items-center gap-3 rounded-full border border-slate-700/80 bg-slate-900/95 px-4 py-2.5 text-sm text-slate-100 shadow-xl backdrop-blur"
+        className="flex w-full max-w-md items-center gap-3 rounded-full border border-slate-700 bg-slate-900 px-4 py-2.5 text-sm text-slate-100"
       >
         {sessionState.kind === "connecting" && (
           <>
